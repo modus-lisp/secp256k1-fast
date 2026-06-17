@@ -19,6 +19,9 @@
                  (:file "sha256")
                  (:file "hmac")
                  (:file "field")
+                 ;; x86-64 inline-asm field primitives (SBCL VOPs); reference
+                 ;; field.lisp stays as fallback + differential oracle.
+                 (:file "field-x86-64" :if-feature (:and :sbcl :x86-64))
                  (:file "scalar")
                  (:file "point")
                  (:file "ecdsa")
