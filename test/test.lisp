@@ -71,6 +71,23 @@
           (setf (aref bad 33) (logxor (aref bad 33) 1))
           (check (format nil "schnorr reject tampered #~d" i) (schnorr:schnorr-verify px m bad) nil))))
 
+    #+(and sbcl x86-64)
+    (progn
+      (format t "== x86-64 VOP field kernel ==~%")
+      (let ((out (make-array 8 :element-type '(unsigned-byte 64))) (ok t))
+        (flet ((i->l (x) (let ((a (make-array 4 :element-type '(unsigned-byte 64))))
+                           (dotimes (i 4 a) (setf (aref a i) (ldb (byte 64 (* i 64)) x)))))
+               (l->i (a) (let ((x 0)) (dotimes (i (length a) x)
+                                        (setf x (logior x (ash (aref a i) (* i 64))))))))
+          (dotimes (i 20000)
+            (let ((aa (random (expt 2 256))) (bb (random (expt 2 256))))
+              (secp256k1-fast::mul256! (i->l aa) (i->l bb) out)
+              (unless (= (l->i out) (* aa bb)) (setf ok nil))))
+          (check "%mul256 VOP == (* a b) (20k random)" ok t)
+          ;; encoding of the kernel's MUL is byte-identical to modus's verified
+          ;; x86-64 encoder (48 F7 E7 for MUL RDI) — cross-checked separately.
+          )))
+
     (format t "~%~a (~d failure~:p)~%" (if (zerop *fail*) "ALL PASS" "FAILURES") *fail*)
     (when (plusp *fail*) (error "secp256k1-fast: ~d test failure(s)" *fail*))
     t))
