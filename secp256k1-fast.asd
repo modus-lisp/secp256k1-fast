@@ -19,13 +19,17 @@
                  (:file "sha256")
                  (:file "hmac")
                  (:file "field")
-                 ;; x86-64 inline-asm field primitives (SBCL VOPs); reference
-                 ;; field.lisp stays as fallback + differential oracle.
-                 (:file "field-x86-64" :if-feature (:and :sbcl :x86-64))
                  (:file "scalar")
                  (:file "point")
                  (:file "ecdsa")
-                 (:file "schnorr"))))
+                 (:file "schnorr")
+                 ;; x86-64 inline-asm field + limb scalar-mult backend (SBCL VOPs).
+                 ;; VOPs first (must be registered before their callers compile),
+                 ;; then the backend, which redefines secp-mul-point / secp-mul-2
+                 ;; to run on limb arrays.  Portable field.lisp / point.lisp stay
+                 ;; as the fallback + differential oracle.
+                 (:file "field-vops-x86-64" :if-feature (:and :sbcl :x86-64))
+                 (:file "field-x86-64" :if-feature (:and :sbcl :x86-64)))))
   :in-order-to ((test-op (test-op "secp256k1-fast/test"))))
 
 (defsystem "secp256k1-fast/test"

@@ -73,20 +73,21 @@
 
     #+(and sbcl x86-64)
     (progn
-      (format t "== x86-64 VOP field kernel ==~%")
-      (let ((out (make-array 8 :element-type '(unsigned-byte 64))) (ok t))
-        (flet ((i->l (x) (let ((a (make-array 4 :element-type '(unsigned-byte 64))))
-                           (dotimes (i 4 a) (setf (aref a i) (ldb (byte 64 (* i 64)) x)))))
-               (l->i (a) (let ((x 0)) (dotimes (i (length a) x)
-                                        (setf x (logior x (ash (aref a i) (* i 64))))))))
-          (dotimes (i 20000)
-            (let ((aa (random (expt 2 256))) (bb (random (expt 2 256))))
-              (secp256k1-fast::mul256! (i->l aa) (i->l bb) out)
-              (unless (= (l->i out) (* aa bb)) (setf ok nil))))
-          (check "%mul256 VOP == (* a b) (20k random)" ok t)
-          ;; encoding of the kernel's MUL is byte-identical to modus's verified
-          ;; x86-64 encoder (48 F7 E7 for MUL RDI) — cross-checked separately.
-          )))
+      (format t "== x86-64 VOP limb field backend ==~%")
+      (let ((p secp:*secp256k1-p*) (om (secp::mkfe)) (oa (secp::mkfe)) (os (secp::mkfe))
+            (mok t) (aok t) (sok t))
+        (dotimes (i 20000)
+          (let* ((x (random p)) (y (random p)) (fx (secp::i->fe x)) (fy (secp::i->fe y)))
+            (secp::fmul! om fx fy) (unless (= (secp::f->i om) (mod (* x y) p)) (setf mok nil))
+            (secp::fadd! oa fx fy) (unless (= (secp::f->i oa) (mod (+ x y) p)) (setf aok nil))
+            (secp::fsub! os fx fy) (unless (= (secp::f->i os) (mod (- x y) p)) (setf sok nil))))
+        (check "%mul256+%reducep fmul! == (* a b) mod p (20k)" mok t)
+        (check "%fadd == (+ a b) mod p (20k)" aok t)
+        (check "%fsub == (- a b) mod p (20k)" sok t))
+      ;; NOTE: every ECDSA/Schnorr/pubkey test above now runs through the limb
+      ;; backend (secp-mul-point/secp-mul-2 are redefined on x86-64); the MUL
+      ;; encoding is byte-identical to modus's verified encoder (cross-checked).
+      )
 
     (format t "~%~a (~d failure~:p)~%" (if (zerop *fail*) "ALL PASS" "FAILURES") *fail*)
     (when (plusp *fail*) (error "secp256k1-fast: ~d test failure(s)" *fail*))
