@@ -41,28 +41,47 @@
 (defun i->fe (x) (let ((a (mkfe))) (dotimes (i 4 a) (setf (aref a i) (ldb (byte 64 (* i 64)) x)))))
 (defun f->i (a) (declare (type fe a)) (logior (aref a 0) (ash (aref a 1) 64) (ash (aref a 2) 128) (ash (aref a 3) 192)))
 
-;;; Field inverse via Fermat (a^(p-2) mod p) on the VOP field — replaces the
-;;; extended-Euclid SECP-INV (which was ~33% of verify in bignum arithmetic).
-;;; The VOP square-and-multiply costs ~256 fsqr! + ~256 fmul! ~ 11us vs ~25us.
+;;; Field inverse a^(p-2) mod p via libsecp256k1's addition chain (~255 squarings
+;;; + 14 multiplies), on the VOP field — ~6us vs ~11us for naive Fermat (which
+;;; multiplied on every set bit of p-2).  Also used to batch-normalize the wNAF
+;;; tables, so a faster inverse compounds there.
 (defvar *one-fe* (i->fe 1))
-(defvar *inv-r* (mkfe)) (defvar *inv-a* (mkfe))
-(defvar *p-minus-2* nil)
+(defvar *inv-r* (mkfe))
+(defvar *ivx2* (mkfe)) (defvar *ivx3* (mkfe)) (defvar *ivx6* (mkfe)) (defvar *ivx9* (mkfe))
+(defvar *ivx11* (mkfe)) (defvar *ivx22* (mkfe)) (defvar *ivx44* (mkfe)) (defvar *ivx88* (mkfe))
+(defvar *ivx176* (mkfe)) (defvar *ivx220* (mkfe)) (defvar *ivx223* (mkfe))
+(declaim (inline fsqr-n))
+(defun fsqr-n (out a n)
+  "out = a^(2^n) — square A N times (N >= 1)."
+  (declare (type fe out a) (type fixnum n) (optimize (speed 3) (safety 0)))
+  (fsqr! out a) (dotimes (i (1- n)) (fsqr! out out)))
+
+(defun fe-inv! (out a)
+  "out = a^(p-2) mod p, fe (assumes a /= 0).  libsecp's addition chain."
+  (declare (type fe out a) (optimize (speed 3) (safety 0)))
+  (fsqr! *ivx2* a)       (fmul! *ivx2* *ivx2* a)         ; x2  = a^(2^2-1)
+  (fsqr! *ivx3* *ivx2*)  (fmul! *ivx3* *ivx3* a)         ; x3  = a^(2^3-1)
+  (fsqr-n *ivx6* *ivx3* 3)    (fmul! *ivx6* *ivx6* *ivx3*)    ; x6
+  (fsqr-n *ivx9* *ivx6* 3)    (fmul! *ivx9* *ivx9* *ivx3*)    ; x9
+  (fsqr-n *ivx11* *ivx9* 2)   (fmul! *ivx11* *ivx11* *ivx2*)  ; x11
+  (fsqr-n *ivx22* *ivx11* 11) (fmul! *ivx22* *ivx22* *ivx11*) ; x22
+  (fsqr-n *ivx44* *ivx22* 22) (fmul! *ivx44* *ivx44* *ivx22*) ; x44
+  (fsqr-n *ivx88* *ivx44* 44) (fmul! *ivx88* *ivx88* *ivx44*) ; x88
+  (fsqr-n *ivx176* *ivx88* 88) (fmul! *ivx176* *ivx176* *ivx88*) ; x176
+  (fsqr-n *ivx220* *ivx176* 44) (fmul! *ivx220* *ivx220* *ivx44*) ; x220
+  (fsqr-n *ivx223* *ivx220* 3) (fmul! *ivx223* *ivx223* *ivx3*)   ; x223
+  (fsqr-n out *ivx223* 23) (fmul! out out *ivx22*)
+  (fsqr-n out out 5)       (fmul! out out a)
+  (fsqr-n out out 3)       (fmul! out out *ivx2*)
+  (fsqr-n out out 2)       (fmul! out out a))
+
 (defun fast-inv (a)
-  "Integer modular inverse mod p via Fermat on the limb VOP field."
+  "Integer modular inverse mod p (addition chain on the VOP field)."
   (secp-init)
   (let ((am (mod a *secp256k1-p*)))
-    (if (zerop am)
-        0
-        (progn
-          (unless *p-minus-2* (setf *p-minus-2* (- *secp256k1-p* 2)))
-          (fcopy! *inv-a* (i->fe am))
-          (fcopy! *inv-r* *one-fe*)
-          (loop for i fixnum from 255 downto 0 do
-            (fsqr! *inv-r* *inv-r*)
-            (when (logbitp i *p-minus-2*) (fmul! *inv-r* *inv-r* *inv-a*)))
-          (f->i *inv-r*)))))
-;; redefine the public SECP-INV (mod p) to use it — speeds jac->affine + the
-;; Shamir precompute's affine point-add, and the reference point.lisp helpers.
+    (if (zerop am) 0 (progn (fe-inv! *inv-r* (i->fe am)) (f->i *inv-r*)))))
+;; SECP-INV (mod p) uses it — speeds jac->affine, the Shamir precompute's affine
+;; point-add, the reference point.lisp helpers, and the wNAF table normalize.
 (defun secp-inv (a) (fast-inv a))
 
 ;;; ===========================================================================
