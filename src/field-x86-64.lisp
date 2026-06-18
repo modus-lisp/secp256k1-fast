@@ -222,15 +222,29 @@
       (setf kk (ash kk -1)) (incf i))
     (values d i)))
 
+;; NAF/wNAF recoding over a 2-limb (lo,hi) view of the sub-scalar (< 2^128).
+;; Looping on the bignum K (ash/decf) conses ~128 bignums per call — the second
+;; biggest verify allocator after the mod-n inverse — so shift/subtract the
+;; scalar as two (unsigned-byte 64) limbs, kept unboxed via #xFFFF...-masking.
+(defmacro %m64 (x) `(logand ,x #xFFFFFFFFFFFFFFFF))
 (declaim (inline naf-into wnaf-into))
 (defun naf-into (k buf)
-  "NAF of K written into BUF (zeroing trailing slots up to its prior use is the
-   caller's job via the returned length) → length.  Allocation-free."
-  (declare (type (simple-array fixnum (*)) buf))
-  (let ((i 0) (kk k))
-    (loop while (plusp kk) do
-      (if (oddp kk) (let ((z (- 2 (mod kk 4)))) (setf (aref buf i) z) (decf kk z)) (setf (aref buf i) 0))
-      (setf kk (ash kk -1)) (incf i))
+  "NAF of K (< 2^128) into BUF → length.  Allocation-free (limb recoding)."
+  (declare (type (simple-array fixnum (*)) buf) (optimize (speed 3) (safety 0)))
+  (let ((lo (ldb (byte 64 0) k)) (hi (ldb (byte 64 64) k)) (i 0))
+    (declare (type (unsigned-byte 64) lo hi) (type fixnum i))
+    (loop until (and (zerop lo) (zerop hi)) do
+      (cond ((logbitp 0 lo)
+             (let ((z (- 2 (logand lo 3))))                 ; lo odd → z in {1,-1}
+               (setf (aref buf i) z)
+               (if (= z 1)
+                   (setf lo (%m64 (- lo 1)))                ; lo odd → no borrow
+                   (if (= lo #xFFFFFFFFFFFFFFFF)
+                       (setf lo 0 hi (%m64 (+ hi 1)))
+                       (setf lo (%m64 (+ lo 1)))))))
+            (t (setf (aref buf i) 0)))
+      (setf lo (%m64 (logior (ash lo -1) (ash (logand hi 1) 63))) hi (ash hi -1))
+      (incf i))
     i))
 
 (defun negy-int (y) (if (zerop y) 0 (- *secp256k1-p* y)))
@@ -310,13 +324,25 @@
     (values d i)))
 
 (defun wnaf-into (k w buf)
-  "Width-w NAF of K written into BUF → length.  Allocation-free."
-  (declare (type (simple-array fixnum (*)) buf))
-  (let ((i 0) (kk k) (m (ash 1 w)) (mh (ash 1 (1- w))))
-    (loop while (plusp kk) do
-      (if (oddp kk) (let ((z (mod kk m))) (when (>= z mh) (decf z m)) (setf (aref buf i) z) (decf kk z))
-          (setf (aref buf i) 0))
-      (setf kk (ash kk -1)) (incf i))
+  "Width-w NAF of K (< 2^128) into BUF → length.  Allocation-free (limb recoding)."
+  (declare (type (simple-array fixnum (*)) buf) (type (integer 1 16) w) (optimize (speed 3) (safety 0)))
+  (let ((lo (ldb (byte 64 0) k)) (hi (ldb (byte 64 64) k)) (i 0)
+        (m (ash 1 w)) (mh (ash 1 (1- w))))
+    (declare (type (unsigned-byte 64) lo hi) (type fixnum i m mh))
+    (loop until (and (zerop lo) (zerop hi)) do
+      (cond ((logbitp 0 lo)
+             (let ((z (logand lo (- m 1))))                 ; lo mod 2^w (w<=16 → fixnum)
+               (when (>= z mh) (decf z m))                  ; signed digit, |z| < 2^(w-1)
+               (setf (aref buf i) z)
+               (if (>= z 0)
+                   (setf lo (%m64 (- lo z)))                ; z>0 → z<=lo, no borrow
+                   (let ((zz (- z)))
+                     (if (<= lo (- #xFFFFFFFFFFFFFFFF zz))
+                         (setf lo (%m64 (+ lo zz)))
+                         (setf lo (%m64 (+ lo zz)) hi (%m64 (+ hi 1))))))))
+            (t (setf (aref buf i) 0)))
+      (setf lo (%m64 (logior (ash lo -1) (ash (logand hi 1) 63))) hi (ash hi -1))
+      (incf i))
     i))
 
 (defvar *wx* (mkfe)) (defvar *wy* (mkfe)) (defvar *wz* (mkfe))
