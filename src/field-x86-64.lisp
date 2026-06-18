@@ -41,6 +41,30 @@
 (defun i->fe (x) (let ((a (mkfe))) (dotimes (i 4 a) (setf (aref a i) (ldb (byte 64 (* i 64)) x)))))
 (defun f->i (a) (declare (type fe a)) (logior (aref a 0) (ash (aref a 1) 64) (ash (aref a 2) 128) (ash (aref a 3) 192)))
 
+;;; Field inverse via Fermat (a^(p-2) mod p) on the VOP field — replaces the
+;;; extended-Euclid SECP-INV (which was ~33% of verify in bignum arithmetic).
+;;; The VOP square-and-multiply costs ~256 fsqr! + ~256 fmul! ~ 11us vs ~25us.
+(defvar *one-fe* (i->fe 1))
+(defvar *inv-r* (mkfe)) (defvar *inv-a* (mkfe))
+(defvar *p-minus-2* nil)
+(defun fast-inv (a)
+  "Integer modular inverse mod p via Fermat on the limb VOP field."
+  (secp-init)
+  (let ((am (mod a *secp256k1-p*)))
+    (if (zerop am)
+        0
+        (progn
+          (unless *p-minus-2* (setf *p-minus-2* (- *secp256k1-p* 2)))
+          (fcopy! *inv-a* (i->fe am))
+          (fcopy! *inv-r* *one-fe*)
+          (loop for i fixnum from 255 downto 0 do
+            (fsqr! *inv-r* *inv-r*)
+            (when (logbitp i *p-minus-2*) (fmul! *inv-r* *inv-r* *inv-a*)))
+          (f->i *inv-r*)))))
+;; redefine the public SECP-INV (mod p) to use it — speeds jac->affine + the
+;; Shamir precompute's affine point-add, and the reference point.lisp helpers.
+(defun secp-inv (a) (fast-inv a))
+
 ;;; ===========================================================================
 ;;; Limb Jacobian point arithmetic (X Y Z each an FE; infinity = Z all-zero)
 ;;; ===========================================================================
@@ -48,7 +72,6 @@
 
 (defvar *tA* (mkfe)) (defvar *tB* (mkfe)) (defvar *tC* (mkfe)) (defvar *tD* (mkfe))
 (defvar *tE* (mkfe)) (defvar *tF* (mkfe)) (defvar *tG* (mkfe))
-(defvar *one-fe* (i->fe 1))
 
 (defun jdbl! (x y z)                            ; in-place double of (x y z)
   (declare (type fe x y z) (optimize (speed 3) (safety 0)))
