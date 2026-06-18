@@ -14,6 +14,12 @@
 
 (in-package #:secp256k1-fast)
 
+;; This file intentionally overrides SECP-INV / SECP-MUL-POINT / SECP-MUL-2 from
+;; the portable field.lisp / point.lisp with the fast x86-64 backend — muffle the
+;; expected redefinition warnings (the portable versions remain the fallback on
+;; other architectures and the differential oracle).
+(declaim (sb-ext:muffle-conditions sb-kernel:redefinition-warning))
+
 ;;; ===========================================================================
 ;;; Limb field-element wrappers (4x (unsigned-byte 64))
 ;;; ===========================================================================
@@ -128,37 +134,6 @@
   (if (fzero? z) (values :inf :inf)
       (let* ((zi (secp-inv (f->i z))) (zi2 (secp-mod (* zi zi))))
         (values (secp-mod (* (f->i x) zi2)) (secp-mod (* (f->i y) zi2 zi))))))
-
-(defvar *RX* (mkfe)) (defvar *RY* (mkfe)) (defvar *RZ* (mkfe))
-(defvar *b1x* (mkfe)) (defvar *b1y* (mkfe)) (defvar *b2x* (mkfe)) (defvar *b2y* (mkfe))
-(defvar *sumx* (mkfe)) (defvar *sumy* (mkfe))
-
-(defun limb-mul-point (k px py)
-  "k * affine-int (px,py) → affine integer point (or :inf)."
-  (declare (optimize (speed 3) (safety 0)))
-  (fcopy! *b1x* (i->fe px)) (fcopy! *b1y* (i->fe py))
-  (fill *RX* 0) (fill *RY* 0) (fill *RZ* 0)
-  (loop for i fixnum from (1- (integer-length k)) downto 0 do
-    (jdbl! *RX* *RY* *RZ*)
-    (when (logbitp i k) (jadd! *RX* *RY* *RZ* *b1x* *b1y*)))
-  (jac->affine-int *RX* *RY* *RZ*))
-
-(defun limb-mul-2 (k1 x1 y1 k2 x2 y2)
-  "k1*(x1,y1) + k2*(x2,y2) via Shamir's trick on the limb backend → affine int / :inf."
-  (declare (optimize (speed 3) (safety 0)))
-  (fcopy! *b1x* (i->fe x1)) (fcopy! *b1y* (i->fe y1))
-  (fcopy! *b2x* (i->fe x2)) (fcopy! *b2y* (i->fe y2))
-  (let* ((sum (secp-add-points (cons x1 y1) (cons x2 y2)))   ; precompute b1+b2 (affine int)
-         (sum-inf (secp-inf-p sum)))
-    (unless sum-inf (fcopy! *sumx* (i->fe (secp-x sum))) (fcopy! *sumy* (i->fe (secp-y sum))))
-    (fill *RX* 0) (fill *RY* 0) (fill *RZ* 0)
-    (loop for i fixnum from (1- (max (integer-length k1) (integer-length k2))) downto 0 do
-      (jdbl! *RX* *RY* *RZ*)
-      (let ((b1 (logbitp i k1)) (b2 (logbitp i k2)))
-        (cond ((and b1 b2) (unless sum-inf (jadd! *RX* *RY* *RZ* *sumx* *sumy*)))
-              (b1 (jadd! *RX* *RY* *RZ* *b1x* *b1y*))
-              (b2 (jadd! *RX* *RY* *RZ* *b2x* *b2y*)))))
-    (jac->affine-int *RX* *RY* *RZ*)))
 
 ;;; ===========================================================================
 ;;; GLV endomorphism + NAF.  secp256k1 has phi(x,y) = (beta*x, y) = lambda*P, so

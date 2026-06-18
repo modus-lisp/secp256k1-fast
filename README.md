@@ -14,35 +14,41 @@ ironclad — all our own code.
 
 ## Design
 
-The point of this package is **performance with a clean seam for going faster**:
+The point of this package is **performance that's auditable** — every fast path
+is verified bit-for-bit against Bitcoin Core's compiled code via a differential
+cross-check, which is the opposite of trusting a black-box FFI to libsecp.
 
 - **`src/field.lisp`** is the base-field (F_p) arithmetic — the *portable integer
-  reference*. It is deliberately the narrow waist of the library. A fast backend
-  (SBCL VOPs over 4×64-bit limbs, or MVM-native code using `mul64lo`/`mul64hi`/
-  `acc128` + Solinas reduction for `p = 2²⁵⁶ − 2³² − 977`) replaces `secp-mul` /
-  `secp-sq` / `secp-inv` here, and everything above is untouched. The reference
-  stays as the differential oracle the fast path is checked against.
-- **`src/point.lisp`** runs the scalar-multiplication hot path in **Jacobian
-  projective coordinates** (one inverse per scalar mult, not ~384), and uses
-  **Shamir's trick** (`secp-mul-2`) for the `u1·G + u2·Q` verify pattern (one
-  shared chain of doublings). Public points stay affine `(x . y)`.
+  reference* and the differential oracle.
+- **`src/field-vops-x86-64.lisp` + `src/field-x86-64.lisp`** are the x86-64 fast
+  backend (SBCL VOPs, loaded only on SBCL/x86-64). Field elements live in 4×64-bit
+  limb arrays with no per-op allocation: a `mul`+`adc` Comba multiply, Solinas
+  reduction for `p = 2²⁵⁶ − 2³² − 977`, and limb add/sub, all in inline assembly.
+  On top: **Jacobian** point arithmetic, the **GLV endomorphism** (`φ(x,y) =
+  (β·x,y) = λ·P`, halves the doublings), an **addition-chain inverse**, and
+  **wNAF** with a static precomputed generator table for the verify hot path.
+  These redefine `secp-mul-point` / `secp-mul-2`; the portable `point.lisp` stays
+  as the fallback (other architectures) and the oracle.
 - **`src/{ecdsa,schnorr}.lisp`** sit on top; **`src/{sha256,hmac}.lisp`** make it
-  self-contained and MVM-portable.
+  self-contained (no ironclad) and MVM-portable.
 
-On an EPYC 7C13 (SBCL): **ECDSA verify ≈ 505/s, Schnorr ≈ 466/s** per core — ~11.6×
-over a naïve affine implementation, before any assembly.
+On an EPYC 7C13 (SBCL): **ECDSA verify ≈ 6,760/s, Schnorr ≈ 3,300/s** per core —
+**~3.75× off libsecp256k1** (whose own `field_mul` is 20.8 ns vs our 22 ns — the
+field primitives are at parity; the remaining gap is C vs Lisp + libsecp's
+hand-tuning, not the math). 157× over the naïve affine start.
 
 ## Layout
 
 ```
 secp256k1-fast.asd
 src/ packages.lisp
-     sha256.lisp hmac.lisp     ; self-contained hashing
-     field.lisp                ; F_p — the VOP/MVM backend seam
-     scalar.lisp               ; F_n (curve order)
-     point.lisp                ; Jacobian + Shamir, affine public API
+     sha256.lisp hmac.lisp        ; self-contained hashing
+     field.lisp scalar.lisp      ; F_p / F_n — portable reference + oracle
+     point.lisp                  ; Jacobian, affine public API (portable fallback)
      ecdsa.lisp schnorr.lisp
-test/ test.lisp                ; SHA/HMAC/BIP340 vectors, round-trips, cross-check
+     field-vops-x86-64.lisp      ; x86-64 field VOPs (mul/reduce/add/sub) [#+x86-64]
+     field-x86-64.lisp           ; limb field + GLV + wNAF + chain inverse [#+x86-64]
+test/ test.lisp                  ; SHA/HMAC/BIP340 vectors, round-trips, cross-check
 ```
 
 ## Correctness
@@ -60,11 +66,22 @@ sbcl --eval '(asdf:test-system "secp256k1-fast")'
   against Bitcoin Core's compiled `libbitcoinkernel`. So this package transitively
   inherits that assurance.
 
+## Done
+
+- **x86-64 SBCL VOP field backend** — `mul`+`adc` Comba multiply + Solinas reduce,
+  limb add/sub, all inline asm, no allocation. (ADX `mulx`/`adcx`/`adox` was
+  measured *not* to help here — even libsecp's own C regresses with `-march=native`
+  on this CPU, and it ships no hand-asm path — so the plain `mul`/`adc` design is
+  right.)
+- **GLV endomorphism**, **wNAF** (static generator table), **addition-chain
+  inverse** — the algorithmic stack that took us to 3.75× of libsecp.
+
 ## Roadmap
 
-- SBCL VOP field backend (x86-64 `mulx`/`adcx`/`adox`, aarch64 `mul`/`umulh`)
-  behind `#+x86-64` / `#+arm64`, reference kept as fallback + oracle.
-- MVM-native field arithmetic once MVM is ANSI-CL (shared limb layout with the
-  VOP path). The endgame: this is the crypto a bare-metal Lisp Bitcoin node runs.
-- Optional GLV endomorphism (constants already gathered) and a generator comb for
-  signing throughput.
+- **Multicore** — the fast-path scratch buffers are module-level (single-threaded);
+  make them thread-local and verification (embarrassingly parallel) scales across
+  all cores. On this 116-core box that's ~670k verify/s aggregate — well past
+  single-core libsecp. The real win for IBD wall-clock.
+- **aarch64 VOPs** (`mul`/`umulh`), or modus-emitted aarch64 for the MVM build.
+- **MVM-native field arithmetic** once MVM is ANSI-CL (shared limb layout). The
+  endgame: this is the crypto a bare-metal Lisp Bitcoin node runs.

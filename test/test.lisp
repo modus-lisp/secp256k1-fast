@@ -4,7 +4,7 @@
   (:use #:cl)
   (:local-nicknames (#:secp #:secp256k1-fast) (#:schnorr #:secp256k1-fast.schnorr)
                     (#:sha #:secp256k1-fast.hash))
-  (:export #:run-all #:cross-check))
+  (:export #:run-all #:cross-check #:bench))
 
 (in-package #:secp256k1-fast.test)
 
@@ -124,3 +124,21 @@
     (format t "~&cross-check vs cl-consensus (~d rounds): ~a~%"
             rounds (if (zerop fails) "IDENTICAL" (format nil "~d MISMATCH" fails)))
     (zerop fails)))
+
+;;; Reproduce the README's per-core throughput numbers.
+;;;   (secp256k1-fast.test:bench)
+(defun bench (&optional (reps 4000))
+  (secp:secp-init)
+  (flet ((rate (thunk n) (let ((s (get-internal-run-time)))
+                           (dotimes (i n) (funcall thunk))
+                           (/ n (/ (float (- (get-internal-run-time) s)) internal-time-units-per-second)))))
+    (let* ((priv 424242424242424242) (pub (secp:secp-pubkey priv))
+           (h (sha:sha256 (ascii "bench")))
+           (d 987654321987654321) (px (schnorr:pubkey-xonly d))
+           (m (sha:sha256 (ascii "bench"))) (ssig (schnorr:schnorr-sign d m)))
+      (multiple-value-bind (r s) (secp:ecdsa-sign-raw priv h)
+        (format t "~&== secp256k1-fast throughput (per core) ==~%")
+        (format t "  ECDSA verify   : ~,0f ops/s~%" (rate (lambda () (secp:ecdsa-verify pub h r s)) reps))
+        (format t "  Schnorr verify : ~,0f ops/s~%" (rate (lambda () (schnorr:schnorr-verify px m ssig)) reps))
+        (format t "  scalar mult kG : ~,0f ops/s~%" (rate (lambda () (secp:secp-mul-point priv (secp:secp-generator))) reps))
+        (values)))))

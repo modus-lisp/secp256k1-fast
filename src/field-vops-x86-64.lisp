@@ -15,9 +15,6 @@
 
 (in-package #:secp256k1-fast)
 
-(sb-c:defknown %mul64 ((unsigned-byte 64) (unsigned-byte 64))
-    (values (unsigned-byte 64) (unsigned-byte 64))
-    (sb-c:foldable sb-c:flushable sb-c:movable))
 (sb-c:defknown %mul256
     (sb-sys:system-area-pointer sb-sys:system-area-pointer sb-sys:system-area-pointer) (values) ())
 (sb-c:defknown %reducep
@@ -28,16 +25,6 @@
     (sb-sys:system-area-pointer sb-sys:system-area-pointer sb-sys:system-area-pointer) (values) ())
 
 (in-package #:sb-vm)
-
-(sb-c:define-vop (secp256k1-fast::%mul64)
-  (:translate secp256k1-fast::%mul64) (:policy :fast-safe)
-  (:args (x :scs (unsigned-reg) :target rax) (y :scs (unsigned-reg unsigned-stack)))
-  (:arg-types unsigned-num unsigned-num)
-  (:temporary (:sc unsigned-reg :offset rax-offset :from (:argument 0) :to (:result 0)) rax)
-  (:temporary (:sc unsigned-reg :offset rdx-offset :from :eval :to (:result 1)) rdx)
-  (:results (lo :scs (unsigned-reg)) (hi :scs (unsigned-reg)))
-  (:result-types unsigned-num unsigned-num)
-  (:generator 6 (move rax x) (inst mul rax y) (move lo rax) (move hi rdx)))
 
 (sb-c:define-vop (secp256k1-fast::%mul256)
   (:translate secp256k1-fast::%mul256) (:policy :fast-safe)
