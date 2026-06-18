@@ -225,7 +225,7 @@
               (when (< i l2) (%addbit lxf y2+ y2- d2 i)))
             (jac->affine-int *gx* *gy* *gz*)))))))
 
-(defun glv-mul-2 (k1 px1 py1 k2 px2 py2)
+(defun glv-mul-2-naf (k1 px1 py1 k2 px2 py2)
   "k1*(px1,py1) + k2*(px2,py2) via GLV + NAF (4 sub-scalars, ~128 doublings)."
   (declare (optimize (speed 3) (safety 0)))
   (multiple-value-bind (ma na mb nb) (glv-split k1)
@@ -245,6 +245,73 @@
               (when (< i lc) (%addbit x2 yc+ yc- dc i))
               (when (< i ld) (%addbit lx2 yd+ yd- dd i)))
             (jac->affine-int *gx* *gy* *gz*))))))))))
+
+;;; wNAF with a STATIC precomputed table for the generator G (and lambda*G).
+;;; In every verify, p1 is G (ECDSA/Schnorr both call secp-mul-2 with the
+;;; generator), so the G-side gets windowed recoding (fewer additions) with NO
+;;; per-verify table build / inverse — the win without the cost.  Window 6 →
+;;; 16-entry table, NAF (window 2) density 1/3 -> wNAF density 1/7 on the G side.
+(defconstant +gwnaf-w+ 6)
+(defvar *gtab* nil)   ; (gx[] gy[] gny[] lgx[]) affine odd multiples of G; λG shares y
+(defun build-gtab ()
+  (secp-init)
+  (let* ((cnt (ash 1 (- +gwnaf-w+ 2))) (g (secp-generator)) (g2 (secp-add-points g g))
+         (gx (make-array cnt)) (gy (make-array cnt)) (gny (make-array cnt)) (lgx (make-array cnt))
+         (beta #x7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee) (cur g))
+    (dotimes (j cnt)
+      (setf (aref gx j) (i->fe (secp-x cur)) (aref gy j) (i->fe (secp-y cur))
+            (aref gny j) (i->fe (negy-int (secp-y cur)))
+            (aref lgx j) (i->fe (secp-mod (* beta (secp-x cur)))))
+      (setf cur (secp-add-points cur g2)))
+    (setf *gtab* (list gx gy gny lgx))))
+
+(defun wnaf (k w)
+  "Width-w NAF: signed odd digits (and 0), index 0 = bit 0, density ~1/(w+1)."
+  (let ((d (make-array (+ 2 (integer-length k)) :element-type 'fixnum :initial-element 0)) (i 0) (kk k)
+        (m (ash 1 w)) (mh (ash 1 (1- w))))
+    (loop while (plusp kk) do
+      (if (oddp kk) (let ((z (mod kk m))) (when (>= z mh) (decf z m)) (setf (aref d i) z) (decf kk z))
+          (setf (aref d i) 0))
+      (setf kk (ash kk -1)) (incf i))
+    (values d i)))
+
+(defvar *wx* (mkfe)) (defvar *wy* (mkfe)) (defvar *wz* (mkfe))
+
+(defun glv-mul-2-gwnaf (u1 k2 px2 py2)
+  "u1*G + k2*(px2,py2): G-side via static wNAF table, Q-side via NAF.  ~128 dbl."
+  (declare (optimize (speed 3) (safety 0)))
+  (unless *gtab* (build-gtab))
+  (multiple-value-bind (ma na mb nb) (glv-split u1)
+    (multiple-value-bind (mc nc md nd) (glv-split k2)
+      (destructuring-bind (gx gy gny lgx) *gtab*
+        (let* ((x2 (i->fe px2)) (lx2 (mkfe)) (y2 (i->fe py2)) (ny2 (i->fe (negy-int py2))))
+          (fmul! lx2 (glv-beta) x2)
+          (let ((yc+ (if nc ny2 y2)) (yc- (if nc y2 ny2)) (yd+ (if nd ny2 y2)) (yd- (if nd y2 ny2)))
+            (multiple-value-bind (da la) (wnaf ma +gwnaf-w+) (multiple-value-bind (db lb) (wnaf mb +gwnaf-w+)
+            (multiple-value-bind (dc lc) (naf mc) (multiple-value-bind (dd ld) (naf md)
+              (fill *wx* 0) (fill *wy* 0) (fill *wz* 0)
+              (loop for i fixnum from (1- (max la lb lc ld)) downto 0 do
+                (jdbl! *wx* *wy* *wz*)
+                (when (< i la) (let ((e (aref da i)))
+                  (unless (zerop e) (let ((j (ash (1- (abs e)) -1)))
+                    (if (eq (> e 0) (not na)) (jadd! *wx* *wy* *wz* (aref gx j) (aref gy j))
+                                              (jadd! *wx* *wy* *wz* (aref gx j) (aref gny j)))))))
+                (when (< i lb) (let ((e (aref db i)))
+                  (unless (zerop e) (let ((j (ash (1- (abs e)) -1)))
+                    (if (eq (> e 0) (not nb)) (jadd! *wx* *wy* *wz* (aref lgx j) (aref gy j))
+                                              (jadd! *wx* *wy* *wz* (aref lgx j) (aref gny j)))))))
+                (when (< i lc) (let ((e (aref dc i)))
+                  (cond ((= e 1) (jadd! *wx* *wy* *wz* x2 yc+)) ((= e -1) (jadd! *wx* *wy* *wz* x2 yc-)))))
+                (when (< i ld) (let ((e (aref dd i)))
+                  (cond ((= e 1) (jadd! *wx* *wy* *wz* lx2 yd+)) ((= e -1) (jadd! *wx* *wy* *wz* lx2 yd-))))))
+              (jac->affine-int *wx* *wy* *wz*)))))))))))
+
+(defun glv-mul-2 (k1 px1 py1 k2 px2 py2)
+  "Dispatch: G-side static-wNAF when p1 is the generator (the verify case),
+   else the general GLV+NAF path."
+  (if (and (= px1 *secp256k1-gx*) (= py1 *secp256k1-gy*))
+      (glv-mul-2-gwnaf k1 k2 px2 py2)
+      (glv-mul-2-naf k1 px1 py1 k2 px2 py2)))
 
 ;;; re-point the public entry functions to the GLV implementations (last def wins)
 (defun secp-mul-point (k p)
