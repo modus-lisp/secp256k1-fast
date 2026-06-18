@@ -142,10 +142,92 @@
     (jac->affine-int *RX* *RY* *RZ*)))
 
 ;;; ===========================================================================
-;;; Redefine the public scalar-mult entry points to use the limb backend.
-;;; (ECDSA / Schnorr call these at runtime, so the redefinition takes effect.)
+;;; GLV endomorphism + NAF.  secp256k1 has phi(x,y) = (beta*x, y) = lambda*P, so
+;;; k*P = k1*P + k2*(lambda*P) with k1,k2 ~128-bit (signed) — HALVING the
+;;; doublings.  NAF (density 1/3) keeps the extra additions in check without
+;;; precomputed tables.  Constants lifted from libsecp256k1 scalar_impl.h /
+;;; field.h; the whole thing is verified against the differential cross-check.
 ;;; ===========================================================================
 
+(defconstant +glv-lambda+ #x5363AD4CC05C30E0A5261C028812645A122E22EA20816678DF02967C1B23BD72)
+(defconstant +glv-g1+     #x3086D221A7D46BCDE86C90E49284EB153DAA8A1471E8CA7FE893209A45DBB031)
+(defconstant +glv-g2+     #xE4437ED6010E88286F547FA90ABFE4C4221208AC9DF506C61571B4AE8AC47F71)
+(defconstant +glv-mb1+    #xE4437ED6010E88286F547FA90ABFE4C3)
+(defconstant +glv-mb2+    #xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE8A280AC50774346DD765CDA83DB1562C)
+(defvar *glv-beta* nil)
+(defun glv-beta () (or *glv-beta*
+  (setf *glv-beta* (i->fe #x7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee))))
+
+(defun glv-split (k)
+  "Split k (mod n) into (values m1 neg1 m2 neg2): k = (+/-)m1 + (+/-)m2*lambda
+   (mod n), with m1, m2 < 2^128 (magnitudes; neg flags carry the sign)."
+  (let* ((n *secp256k1-n*)
+         (c1 (let ((l (* k +glv-g1+))) (+ (ash l -384) (logand (ash l -383) 1))))
+         (c2 (let ((l (* k +glv-g2+))) (+ (ash l -384) (logand (ash l -383) 1))))
+         (r2 (mod (+ (* c1 +glv-mb1+) (* c2 +glv-mb2+)) n))
+         (r1 (mod (- k (mod (* r2 +glv-lambda+) n)) n))
+         (m1 r1) (neg1 nil) (m2 r2) (neg2 nil) (h (ash n -1)))
+    (when (> r1 h) (setf m1 (- n r1) neg1 t))
+    (when (> r2 h) (setf m2 (- n r2) neg2 t))
+    (values m1 neg1 m2 neg2)))
+
+(defun naf (k)
+  "Non-adjacent form of K → (values digit-vector length), digits in {-1,0,1},
+   index 0 = bit 0.  ~1/3 of digits nonzero."
+  (let ((d (make-array (+ 2 (integer-length k)) :element-type 'fixnum :initial-element 0)) (i 0) (kk k))
+    (loop while (plusp kk) do
+      (if (oddp kk) (let ((z (- 2 (mod kk 4)))) (setf (aref d i) z) (decf kk z)) (setf (aref d i) 0))
+      (setf kk (ash kk -1)) (incf i))
+    (values d i)))
+
+(defun negy-int (y) (if (zerop y) 0 (- *secp256k1-p* y)))
+
+;;; reusable buffers (single-threaded fast path)
+(defvar *gx* (mkfe)) (defvar *gy* (mkfe)) (defvar *gz* (mkfe))
+
+(defmacro %addbit (x yplus yminus dvec i)
+  `(let ((e (aref ,dvec ,i)))
+     (cond ((= e 1) (jadd! *gx* *gy* *gz* ,x ,yplus)) ((= e -1) (jadd! *gx* *gy* *gz* ,x ,yminus)))))
+
+(defun glv-mul-point (k px py)
+  "k * affine-int (px,py) via GLV + NAF → affine int / :inf."
+  (declare (optimize (speed 3) (safety 0)))
+  (multiple-value-bind (m1 n1 m2 n2) (glv-split k)
+    (let* ((xf (i->fe px)) (lxf (mkfe)) (yf (i->fe py)) (nyf (i->fe (negy-int py))))
+      (fmul! lxf (glv-beta) xf)                    ; lambda*P x = beta*px
+      (let ((y1+ (if n1 nyf yf)) (y1- (if n1 yf nyf))
+            (y2+ (if n2 nyf yf)) (y2- (if n2 yf nyf)))
+        (multiple-value-bind (d1 l1) (naf m1)
+          (multiple-value-bind (d2 l2) (naf m2)
+            (fill *gx* 0) (fill *gy* 0) (fill *gz* 0)
+            (loop for i fixnum from (1- (max l1 l2)) downto 0 do
+              (jdbl! *gx* *gy* *gz*)
+              (when (< i l1) (%addbit xf y1+ y1- d1 i))
+              (when (< i l2) (%addbit lxf y2+ y2- d2 i)))
+            (jac->affine-int *gx* *gy* *gz*)))))))
+
+(defun glv-mul-2 (k1 px1 py1 k2 px2 py2)
+  "k1*(px1,py1) + k2*(px2,py2) via GLV + NAF (4 sub-scalars, ~128 doublings)."
+  (declare (optimize (speed 3) (safety 0)))
+  (multiple-value-bind (ma na mb nb) (glv-split k1)
+    (multiple-value-bind (mc nc md nd) (glv-split k2)
+      (let* ((x1 (i->fe px1)) (lx1 (mkfe)) (y1 (i->fe py1)) (ny1 (i->fe (negy-int py1)))
+             (x2 (i->fe px2)) (lx2 (mkfe)) (y2 (i->fe py2)) (ny2 (i->fe (negy-int py2))))
+        (fmul! lx1 (glv-beta) x1) (fmul! lx2 (glv-beta) x2)
+        (let ((ya+ (if na ny1 y1)) (ya- (if na y1 ny1)) (yb+ (if nb ny1 y1)) (yb- (if nb y1 ny1))
+              (yc+ (if nc ny2 y2)) (yc- (if nc y2 ny2)) (yd+ (if nd ny2 y2)) (yd- (if nd y2 ny2)))
+          (multiple-value-bind (da la) (naf ma) (multiple-value-bind (db lb) (naf mb)
+          (multiple-value-bind (dc lc) (naf mc) (multiple-value-bind (dd ld) (naf md)
+            (fill *gx* 0) (fill *gy* 0) (fill *gz* 0)
+            (loop for i fixnum from (1- (max la lb lc ld)) downto 0 do
+              (jdbl! *gx* *gy* *gz*)
+              (when (< i la) (%addbit x1 ya+ ya- da i))
+              (when (< i lb) (%addbit lx1 yb+ yb- db i))
+              (when (< i lc) (%addbit x2 yc+ yc- dc i))
+              (when (< i ld) (%addbit lx2 yd+ yd- dd i)))
+            (jac->affine-int *gx* *gy* *gz*))))))))))
+
+;;; re-point the public entry functions to the GLV implementations (last def wins)
 (defun secp-mul-point (k p)
   (secp-init)
   (if (secp-inf-p p)
@@ -153,7 +235,7 @@
       (let ((kk (mod k *secp256k1-n*)))
         (if (zerop kk)
             *secp256k1-infinity*
-            (multiple-value-bind (x y) (limb-mul-point kk (secp-x p) (secp-y p))
+            (multiple-value-bind (x y) (glv-mul-point kk (secp-x p) (secp-y p))
               (if (eq x :inf) *secp256k1-infinity* (cons x y)))))))
 
 (defun secp-mul-2 (k1 p1 k2 p2)
@@ -161,6 +243,6 @@
   (if (or (secp-inf-p p1) (secp-inf-p p2))
       (secp-add-points (secp-mul-point k1 p1) (secp-mul-point k2 p2))
       (multiple-value-bind (x y)
-          (limb-mul-2 (mod k1 *secp256k1-n*) (secp-x p1) (secp-y p1)
-                      (mod k2 *secp256k1-n*) (secp-x p2) (secp-y p2))
+          (glv-mul-2 (mod k1 *secp256k1-n*) (secp-x p1) (secp-y p1)
+                     (mod k2 *secp256k1-n*) (secp-x p2) (secp-y p2))
         (if (eq x :inf) *secp256k1-infinity* (cons x y)))))
