@@ -93,9 +93,12 @@
     (when (plusp *fail*) (error "secp256k1-fast: ~d test failure(s)" *fail*))
     t))
 
-;;; Optional: prove equivalence to cl-consensus's crypto, which is itself
-;;; differential-tested bit-for-bit against Bitcoin Core's libbitcoinkernel.
-;;; If this matches over random inputs, secp256k1-fast inherits that assurance.
+;;; Compare against cl-consensus's crypto over random inputs.
+;;; NOTE: cl-consensus now DEPENDS ON secp256k1-fast (its crypto is a re-export
+;;; shim), so this is a self-consistency smoke test, not an independent oracle.
+;;; The real cross-implementation validation against Bitcoin Core is
+;;; cl-consensus's regression (conformance / block sweep / libbitcoinkernel FFI
+;;; diff), which now runs entirely on this crypto.
 ;;; Run manually:  (secp256k1-fast.test:cross-check 500)
 (defun cross-check (&optional (rounds 500))
   (secp:secp-init)
