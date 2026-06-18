@@ -23,6 +23,12 @@
     (sb-sys:system-area-pointer sb-sys:system-area-pointer sb-sys:system-area-pointer) (values) ())
 (sb-c:defknown %fsub
     (sb-sys:system-area-pointer sb-sys:system-area-pointer sb-sys:system-area-pointer) (values) ())
+;; Montgomery reduction mod n (scalar field).  PT -> 9-limb scratch holding a
+;; 512-bit product in limbs 0..7 (limb 8 is zeroed by the VOP); PO <- 4-limb
+;; result = PT * R^-1 mod n, R = 2^256.  Lets the mod-n inverse run as a fixed
+;; Fermat addition chain over limb arrays (no bignum extended-Euclid).
+(sb-c:defknown %montredn
+    (sb-sys:system-area-pointer sb-sys:system-area-pointer) (values) ())
 
 (in-package #:sb-vm)
 
@@ -61,6 +67,39 @@
     (inst mov rax #xFFFFFFFEFFFFFC2F) (inst sub rdx rax) (inst sbb cc -1) (inst sbb s0 -1) (inst sbb s1 -1)
     (inst cmov :nc r0 rdx) (inst cmov :nc r1 cc) (inst cmov :nc r2 s0) (inst cmov :nc r3 s1)
     (inst mov (ea 0 po) r0) (inst mov (ea 8 po) r1) (inst mov (ea 16 po) r2) (inst mov (ea 24 po) r3)))
+
+(sb-c:define-vop (secp256k1-fast::%montredn)
+  (:translate secp256k1-fast::%montredn) (:policy :fast-safe)
+  (:args (pt :scs (sap-reg)) (po :scs (sap-reg))) (:arg-types system-area-pointer system-area-pointer)
+  (:temporary (:sc unsigned-reg :offset rax-offset) rax) (:temporary (:sc unsigned-reg :offset rdx-offset) rdx)
+  (:temporary (:sc unsigned-reg) np) (:temporary (:sc unsigned-reg) m) (:temporary (:sc unsigned-reg) cc)
+  (:temporary (:sc unsigned-reg) nt)
+  (:temporary (:sc unsigned-reg) r0) (:temporary (:sc unsigned-reg) r1) (:temporary (:sc unsigned-reg) r2) (:temporary (:sc unsigned-reg) r3)
+  (:generator 200
+    ;; SOS Montgomery reduction: t (9 limbs, [8] zeroed here) -> t*R^-1 mod n.
+    (let ((n0 #xBFD25E8CD0364141) (n1 #xBAAEDCE6AF48A03B) (n2 #xFFFFFFFFFFFFFFFE) (n3 #xFFFFFFFFFFFFFFFF)
+          (n0p #x4B0DFF665588B13F))
+      (let ((nl (list n0 n1 n2 n3)))
+        (inst mov :qword (ea 64 pt) 0)
+        (dotimes (i 4)
+          (inst mov rax (ea (* 8 i) pt)) (inst mov np n0p) (inst imul rax np) (inst mov m rax)  ; m = t[i]*n0' mod 2^64
+          (inst xor cc cc)
+          (dotimes (j 4)
+            (inst mov rax m) (inst mov nt (nth j nl)) (inst mul rax nt)        ; rdx:rax = m*n[j]
+            (inst add rax (ea (* 8 (+ i j)) pt)) (inst adc rdx 0)
+            (inst add rax cc) (inst adc rdx 0)
+            (inst mov (ea (* 8 (+ i j)) pt) rax) (inst mov cc rdx))
+          (inst add (ea (* 8 (+ i 4)) pt) cc)                                  ; fold carry into limb i+4
+          (loop for k from (+ i 5) to 8 do (inst adc :qword (ea (* 8 k) pt) 0)))  ; ripple to limb 8
+        ;; result in t[4..7](+t[8]); one conditional subtract of n
+        (inst mov r0 (ea 32 pt)) (inst mov r1 (ea 40 pt)) (inst mov r2 (ea 48 pt)) (inst mov r3 (ea 56 pt))
+        (inst mov np r0) (inst mov nt n0) (inst sub np nt)
+        (inst mov m  r1) (inst mov nt n1) (inst sbb m nt)
+        (inst mov cc r2) (inst mov nt n2) (inst sbb cc nt)
+        (inst mov rdx r3) (inst mov nt n3) (inst sbb rdx nt)
+        (inst mov rax (ea 64 pt)) (inst sbb rax 0)
+        (inst cmov :nc r0 np) (inst cmov :nc r1 m) (inst cmov :nc r2 cc) (inst cmov :nc r3 rdx)
+        (inst mov (ea 0 po) r0) (inst mov (ea 8 po) r1) (inst mov (ea 16 po) r2) (inst mov (ea 24 po) r3)))))
 
 (sb-c:define-vop (secp256k1-fast::%fadd)
   (:translate secp256k1-fast::%fadd) (:policy :fast-safe)

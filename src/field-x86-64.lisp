@@ -93,6 +93,52 @@
 (defun secp-inv (a) (fast-inv a))
 
 ;;; ===========================================================================
+;;; Scalar field F_n inverse — Montgomery arithmetic + Fermat addition chain.
+;;; The portable secp-inv-mod (extended-Euclid bignums) was the single biggest
+;;; allocator in ECDSA verify (~43 KB / verify of churn → GC-bound on many cores).
+;;; n is not a Solinas-friendly prime, so we use Montgomery: %mul256 for the
+;;; 512-bit product + %montredn (SOS reduction, n's limbs baked in) for R^-1.
+;;; All on fixed limb buffers → zero per-op allocation; verified bit-for-bit vs
+;;; the bignum inverse.  Window-free square-and-multiply over e = n-2.
+;;; ===========================================================================
+(defconstant +n-minus-2+ (- #xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141 2))
+(defvar *mont-scratch* (make-array 9 :element-type '(unsigned-byte 64) :initial-element 0))
+(defvar *nR*    (i->fe #x14551231950B75FC4402DA1732FC9BEBF))                                 ; R   mod n = mont(1)
+(defvar *nR2*   (i->fe #x9D671CD581C69BC5E697F5E45BCD07C6741496C20E7CF878896CF21467D7D140))   ; R^2 mod n
+(defvar *n-acc* (mkfe)) (defvar *n-base* (mkfe)) (defvar *n-out* (mkfe))
+
+(declaim (inline nmul! nsqr!))
+(defun nmul! (out a b)
+  "out = a*b*R^-1 mod n (Montgomery product)."
+  (declare (type fe out a b) (optimize (speed 3) (safety 0)))
+  (sb-sys:with-pinned-objects (a b out *mont-scratch*)
+    (%mul256 (sb-sys:vector-sap a) (sb-sys:vector-sap b) (sb-sys:vector-sap *mont-scratch*))
+    (%montredn (sb-sys:vector-sap *mont-scratch*) (sb-sys:vector-sap out))))
+(defun nsqr! (out a) (nmul! out a a))
+
+(defun n-inv! (out a)
+  "out = a^-1 mod n (fe, assumes 0 < a < n).  a^(n-2) via Montgomery exponentiation."
+  (declare (type fe out a) (optimize (speed 3) (safety 0)))
+  (nmul! *n-base* a *nR2*)             ; base = aR   (into Montgomery form)
+  (fcopy! *n-acc* *nR*)                ; acc  = R = mont(1)
+  (loop for bit fixnum from (1- (integer-length +n-minus-2+)) downto 0 do
+    (nsqr! *n-acc* *n-acc*)
+    (when (logbitp bit +n-minus-2+) (nmul! *n-acc* *n-acc* *n-base*)))
+  (nmul! out *n-acc* *one-fe*))        ; acc * 1 * R^-1  (out of Montgomery form)
+
+;; Redefine the scalar inverse: fast Montgomery path for the curve order n
+;; (the only modulus ECDSA uses); portable extended-Euclid kept for any other m.
+(defun secp-inv-mod (a m)
+  (if (= m *secp256k1-n*)
+      (let ((am (mod a m)))
+        (if (zerop am) 0 (progn (n-inv! *n-out* (i->fe am)) (f->i *n-out*))))
+      (let ((t0 0) (t1 1) (r0 m) (r1 (mod a m)))
+        (loop while (not (zerop r1)) do
+          (let* ((q (floor r0 r1)) (nr (- r0 (* q r1))) (nt (- t0 (* q t1))))
+            (setf r0 r1 r1 nr t0 t1 t1 nt)))
+        (if (< t0 0) (+ t0 m) t0))))
+
+;;; ===========================================================================
 ;;; Limb Jacobian point arithmetic (X Y Z each an FE; infinity = Z all-zero)
 ;;; ===========================================================================
 ;;; Scratch FEs are module-level (single-threaded fast path; see header note).
@@ -365,7 +411,9 @@
          (*nbb* (make-array 136 :element-type 'fixnum :initial-element 0))
          (*nbc* (make-array 136 :element-type 'fixnum :initial-element 0))
          (*nbd* (make-array 136 :element-type 'fixnum :initial-element 0))
-         (*q2x* (mkfe)) (*q2lx* (mkfe)) (*q2y* (mkfe)) (*q2ny* (mkfe)))
+         (*q2x* (mkfe)) (*q2lx* (mkfe)) (*q2y* (mkfe)) (*q2ny* (mkfe))
+         (*mont-scratch* (make-array 9 :element-type '(unsigned-byte 64) :initial-element 0))
+         (*n-acc* (mkfe)) (*n-base* (mkfe)) (*n-out* (mkfe)))
      ,@body))
 
 ;; Build the static generator wNAF table now (read-only thereafter → race-free).
