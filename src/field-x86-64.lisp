@@ -8,9 +8,9 @@
 ;;;; AND the differential oracle (cross-checked byte-for-byte vs cl-consensus,
 ;;;; which is checked vs Bitcoin Core).
 ;;;;
-;;;; NOTE: the scalar-mult scratch buffers are module-level → the fast path is
-;;;; currently single-threaded (fine for tests + a single IBD thread).  Per-call
-;;;; / thread-local buffers are a follow-up for parallel IBD.
+;;;; The scalar-mult scratch buffers are module-level (fast, zero per-op alloc).
+;;;; For parallel verify, WITH-FRESH-SCRATCH (bottom of file) rebinds them
+;;;; per-thread — wrap each worker thread's verify loop in it.
 
 (in-package #:secp256k1-fast)
 
@@ -307,3 +307,30 @@
           (glv-mul-2 (mod k1 *secp256k1-n*) (secp-x p1) (secp-y p1)
                      (mod k2 *secp256k1-n*) (secp-x p2) (secp-y p2))
         (if (eq x :inf) *secp256k1-infinity* (cons x y)))))
+
+;;; ===========================================================================
+;;; Reentrancy for multicore verify.  The scalar-mult scratch buffers above are
+;;; module-level (fast, zero per-op allocation), which means a single thread at a
+;;; time.  WITH-FRESH-SCRATCH rebinds them all to fresh per-thread arrays for its
+;;; dynamic extent — wrap each worker thread's verify loop in it and verification
+;;; (embarrassingly parallel) scales across cores.  Single-threaded callers use
+;;; the module globals unchanged (no per-call cost).  The static G table (*gtab*,
+;;; *glv-beta*) is read-only after build, so it's shared safely — built eagerly
+;;; below to avoid a first-call race.
+;;; ===========================================================================
+
+(defmacro with-fresh-scratch (&body body)
+  `(let ((*fmul-scratch* (make-array 8 :element-type '(unsigned-byte 64)))
+         (*inv-r* (mkfe))
+         (*ivx2* (mkfe)) (*ivx3* (mkfe)) (*ivx6* (mkfe)) (*ivx9* (mkfe)) (*ivx11* (mkfe))
+         (*ivx22* (mkfe)) (*ivx44* (mkfe)) (*ivx88* (mkfe)) (*ivx176* (mkfe))
+         (*ivx220* (mkfe)) (*ivx223* (mkfe))
+         (*tA* (mkfe)) (*tB* (mkfe)) (*tC* (mkfe)) (*tD* (mkfe)) (*tE* (mkfe)) (*tF* (mkfe)) (*tG* (mkfe))
+         (*aZZ* (mkfe)) (*aU2* (mkfe)) (*aS2* (mkfe)) (*aH* (mkfe)) (*aRR* (mkfe))
+         (*aHH* (mkfe)) (*aI* (mkfe)) (*aJ* (mkfe)) (*aV* (mkfe)) (*aT* (mkfe))
+         (*gx* (mkfe)) (*gy* (mkfe)) (*gz* (mkfe))
+         (*wx* (mkfe)) (*wy* (mkfe)) (*wz* (mkfe)))
+     ,@body))
+
+;; Build the static generator wNAF table now (read-only thereafter → race-free).
+(build-gtab)

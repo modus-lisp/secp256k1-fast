@@ -22,7 +22,9 @@
    ;; scalar (mod n)
    #:secp-inv-mod
    ;; ECDSA
-   #:ecdsa-sign-raw #:ecdsa-verify #:rfc6979-k))
+   #:ecdsa-sign-raw #:ecdsa-verify #:rfc6979-k
+   ;; reentrancy: bind the scalar-mult scratch per-thread for parallel verify
+   #:with-fresh-scratch))
 
 (defpackage #:secp256k1-fast.schnorr
   (:use #:cl)

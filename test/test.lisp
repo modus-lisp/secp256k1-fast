@@ -4,7 +4,7 @@
   (:use #:cl)
   (:local-nicknames (#:secp #:secp256k1-fast) (#:schnorr #:secp256k1-fast.schnorr)
                     (#:sha #:secp256k1-fast.hash))
-  (:export #:run-all #:cross-check #:bench))
+  (:export #:run-all #:cross-check #:bench #:thread-test))
 
 (in-package #:secp256k1-fast.test)
 
@@ -145,3 +145,32 @@
         (format t "  Schnorr verify : ~,0f ops/s~%" (rate (lambda () (schnorr:schnorr-verify px m ssig)) reps))
         (format t "  scalar mult kG : ~,0f ops/s~%" (rate (lambda () (secp:secp-mul-point priv (secp:secp-generator))) reps))
         (values)))))
+
+;;; Multicore: verification is embarrassingly parallel.  Each worker thread wraps
+;;; its loop in WITH-FRESH-SCRATCH (per-thread buffers); without it the shared
+;;; scratch would corrupt across threads.  Run:  (secp256k1-fast.test:thread-test)
+(defun thread-test (&optional (nthreads 16) (per 3000))
+  (secp:secp-init)
+  (let* ((priv 424242424242424242) (pub (secp:secp-pubkey priv)) (h (sha:sha256 (ascii "thr"))))
+    (multiple-value-bind (r s) (secp:ecdsa-sign-raw priv h)
+      (flet ((work ()                       ; per thread: `per` valid+tampered checks → error count
+               (secp:with-fresh-scratch
+                 (let ((bad 0))
+                   (dotimes (i per)
+                     (unless (secp:ecdsa-verify pub h r s) (incf bad))
+                     (when (secp:ecdsa-verify pub h r (1+ s)) (incf bad)))
+                   bad))))
+        (let* ((rt0 (get-internal-real-time)) (b1 (work))
+               (t1 (/ (float (- (get-internal-real-time) rt0)) internal-time-units-per-second))
+               (rtn (get-internal-real-time))
+               (threads (loop repeat nthreads collect (sb-thread:make-thread #'work)))
+               (bads (mapcar #'sb-thread:join-thread threads))
+               (tn (/ (float (- (get-internal-real-time) rtn)) internal-time-units-per-second))
+               (errs (+ b1 (reduce #'+ bads))))
+          (format t "~&== multicore verify: ~d threads ==~%" nthreads)
+          (format t "  correctness   : ~a (~d errors / ~d concurrent verifies)~%"
+                  (if (zerop errs) "OK" "FAIL") errs (* (1+ nthreads) per 2))
+          (format t "  1 thread      : ~,0f verify/s~%" (/ (* per 2) t1))
+          (format t "  ~d threads    : ~,0f verify/s aggregate (~,1fx)~%"
+                  nthreads (/ (* nthreads per 2) tn) (/ (/ (* nthreads per 2) tn) (/ (* per 2) t1)))
+          (zerop errs))))))
