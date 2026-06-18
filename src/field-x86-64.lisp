@@ -45,6 +45,8 @@
 (defun fcopy! (out a) (declare (type fe out a)) (dotimes (i 4) (setf (aref out i) (aref a i))))
 (defun fzero? (a) (declare (type fe a)) (and (zerop (aref a 0)) (zerop (aref a 1)) (zerop (aref a 2)) (zerop (aref a 3))))
 (defun i->fe (x) (let ((a (mkfe))) (dotimes (i 4 a) (setf (aref a i) (ldb (byte 64 (* i 64)) x)))))
+(declaim (inline i->fe!))
+(defun i->fe! (out x) (declare (type fe out)) (dotimes (i 4 out) (setf (aref out i) (ldb (byte 64 (* i 64)) x))))
 (defun f->i (a) (declare (type fe a)) (logior (aref a 0) (ash (aref a 1) 64) (ash (aref a 2) 128) (ash (aref a 3) 192)))
 
 ;;; Field inverse a^(p-2) mod p via libsecp256k1's addition chain (~255 squarings
@@ -174,6 +176,17 @@
       (setf kk (ash kk -1)) (incf i))
     (values d i)))
 
+(declaim (inline naf-into wnaf-into))
+(defun naf-into (k buf)
+  "NAF of K written into BUF (zeroing trailing slots up to its prior use is the
+   caller's job via the returned length) → length.  Allocation-free."
+  (declare (type (simple-array fixnum (*)) buf))
+  (let ((i 0) (kk k))
+    (loop while (plusp kk) do
+      (if (oddp kk) (let ((z (- 2 (mod kk 4)))) (setf (aref buf i) z) (decf kk z)) (setf (aref buf i) 0))
+      (setf kk (ash kk -1)) (incf i))
+    i))
+
 (defun negy-int (y) (if (zerop y) 0 (- *secp256k1-p* y)))
 
 ;;; reusable buffers (single-threaded fast path)
@@ -250,7 +263,24 @@
       (setf kk (ash kk -1)) (incf i))
     (values d i)))
 
+(defun wnaf-into (k w buf)
+  "Width-w NAF of K written into BUF → length.  Allocation-free."
+  (declare (type (simple-array fixnum (*)) buf))
+  (let ((i 0) (kk k) (m (ash 1 w)) (mh (ash 1 (1- w))))
+    (loop while (plusp kk) do
+      (if (oddp kk) (let ((z (mod kk m))) (when (>= z mh) (decf z m)) (setf (aref buf i) z) (decf kk z))
+          (setf (aref buf i) 0))
+      (setf kk (ash kk -1)) (incf i))
+    i))
+
 (defvar *wx* (mkfe)) (defvar *wy* (mkfe)) (defvar *wz* (mkfe))
+;;; per-thread reusable buffers for the verify hot path (glv-mul-2-gwnaf):
+;;; 4 NAF digit buffers (sub-scalars < 2^128 → length ≤ ~130) + Q-side fe's.
+(defvar *nba* (make-array 136 :element-type 'fixnum :initial-element 0))
+(defvar *nbb* (make-array 136 :element-type 'fixnum :initial-element 0))
+(defvar *nbc* (make-array 136 :element-type 'fixnum :initial-element 0))
+(defvar *nbd* (make-array 136 :element-type 'fixnum :initial-element 0))
+(defvar *q2x* (mkfe)) (defvar *q2lx* (mkfe)) (defvar *q2y* (mkfe)) (defvar *q2ny* (mkfe))
 
 (defun glv-mul-2-gwnaf (u1 k2 px2 py2)
   "u1*G + k2*(px2,py2): G-side via static wNAF table, Q-side via NAF.  ~128 dbl."
@@ -259,11 +289,12 @@
   (multiple-value-bind (ma na mb nb) (glv-split u1)
     (multiple-value-bind (mc nc md nd) (glv-split k2)
       (destructuring-bind (gx gy gny lgx) *gtab*
-        (let* ((x2 (i->fe px2)) (lx2 (mkfe)) (y2 (i->fe py2)) (ny2 (i->fe (negy-int py2))))
+        (let* ((x2 *q2x*) (lx2 *q2lx*) (y2 *q2y*) (ny2 *q2ny*))
+          (i->fe! x2 px2) (i->fe! y2 py2) (i->fe! ny2 (negy-int py2))
           (fmul! lx2 (glv-beta) x2)
           (let ((yc+ (if nc ny2 y2)) (yc- (if nc y2 ny2)) (yd+ (if nd ny2 y2)) (yd- (if nd y2 ny2)))
-            (multiple-value-bind (da la) (wnaf ma +gwnaf-w+) (multiple-value-bind (db lb) (wnaf mb +gwnaf-w+)
-            (multiple-value-bind (dc lc) (naf mc) (multiple-value-bind (dd ld) (naf md)
+            (let ((da *nba*) (la (wnaf-into ma +gwnaf-w+ *nba*)) (db *nbb*) (lb (wnaf-into mb +gwnaf-w+ *nbb*))
+                  (dc *nbc*) (lc (naf-into mc *nbc*)) (dd *nbd*) (ld (naf-into md *nbd*)))
               (fill *wx* 0) (fill *wy* 0) (fill *wz* 0)
               (loop for i fixnum from (1- (max la lb lc ld)) downto 0 do
                 (jdbl! *wx* *wy* *wz*)
@@ -279,7 +310,7 @@
                   (cond ((= e 1) (jadd! *wx* *wy* *wz* x2 yc+)) ((= e -1) (jadd! *wx* *wy* *wz* x2 yc-)))))
                 (when (< i ld) (let ((e (aref dd i)))
                   (cond ((= e 1) (jadd! *wx* *wy* *wz* lx2 yd+)) ((= e -1) (jadd! *wx* *wy* *wz* lx2 yd-))))))
-              (jac->affine-int *wx* *wy* *wz*)))))))))))
+              (jac->affine-int *wx* *wy* *wz*))))))))
 
 (defun glv-mul-2 (k1 px1 py1 k2 px2 py2)
   "Dispatch: G-side static-wNAF when p1 is the generator (the verify case),
@@ -329,7 +360,12 @@
          (*aZZ* (mkfe)) (*aU2* (mkfe)) (*aS2* (mkfe)) (*aH* (mkfe)) (*aRR* (mkfe))
          (*aHH* (mkfe)) (*aI* (mkfe)) (*aJ* (mkfe)) (*aV* (mkfe)) (*aT* (mkfe))
          (*gx* (mkfe)) (*gy* (mkfe)) (*gz* (mkfe))
-         (*wx* (mkfe)) (*wy* (mkfe)) (*wz* (mkfe)))
+         (*wx* (mkfe)) (*wy* (mkfe)) (*wz* (mkfe))
+         (*nba* (make-array 136 :element-type 'fixnum :initial-element 0))
+         (*nbb* (make-array 136 :element-type 'fixnum :initial-element 0))
+         (*nbc* (make-array 136 :element-type 'fixnum :initial-element 0))
+         (*nbd* (make-array 136 :element-type 'fixnum :initial-element 0))
+         (*q2x* (mkfe)) (*q2lx* (mkfe)) (*q2y* (mkfe)) (*q2ny* (mkfe)))
      ,@body))
 
 ;; Build the static generator wNAF table now (read-only thereafter → race-free).
