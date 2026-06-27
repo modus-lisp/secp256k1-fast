@@ -5,7 +5,16 @@ on:
   workflow_dispatch:
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Run on both architectures so each field-vops-* backend is exercised by the
+    # in-tree differential oracle (the suite runs entirely through the limb VOPs).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86-64, runner: ubuntu-latest }
+          - { arch: arm64,  runner: ubuntu-24.04-arm }
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Install SBCL

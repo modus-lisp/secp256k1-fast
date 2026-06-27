@@ -1,12 +1,16 @@
-;;;; field-x86-64.lisp — x86-64 limb field + point backend.
+;;;; field-limb.lisp — limb field + point backend (architecture-neutral).
 ;;;;
-;;;; Loaded ONLY on SBCL/x86-64 and LAST.  Uses the field VOPs from
-;;;; field-vops-x86-64.lisp (loaded just before this) to run the scalar-
-;;;; multiplication hot path entirely on 4x64-bit limb arrays with no per-op
-;;;; allocation, then REDEFINES SECP-MUL-POINT / SECP-MUL-2 so ECDSA/Schnorr
-;;;; verify go through it.  Portable field.lisp / point.lisp stay as the fallback
-;;;; AND the differential oracle (cross-checked byte-for-byte vs cl-consensus,
-;;;; which is checked vs Bitcoin Core).
+;;;; Loaded ONLY on SBCL with a limb-VOP backend (x86-64 or arm64) and LAST.
+;;;; Uses the five field VOPs — %mul256 %reducep %fadd %fsub %montredn — supplied
+;;;; by the per-architecture file loaded just before this (field-vops-x86-64.lisp
+;;;; or field-vops-aarch64.lisp).  This file itself is portable Lisp: it names
+;;;; only those VOP symbols, never any instruction, so the same backend drives
+;;;; every supported CPU.  It runs the scalar-multiplication hot path entirely on
+;;;; 4x64-bit limb arrays with no per-op allocation, then REDEFINES
+;;;; SECP-MUL-POINT / SECP-MUL-2 so ECDSA/Schnorr verify go through it.  Portable
+;;;; field.lisp / point.lisp stay as the fallback AND the differential oracle
+;;;; (cross-checked byte-for-byte vs cl-consensus, which is checked vs Bitcoin
+;;;; Core) — the same oracle validates each architecture's VOPs.
 ;;;;
 ;;;; The scalar-mult scratch buffers are module-level (fast, zero per-op alloc).
 ;;;; For parallel verify, WITH-FRESH-SCRATCH (bottom of file) rebinds them
@@ -15,7 +19,7 @@
 (in-package #:secp256k1-fast)
 
 ;; This file intentionally overrides SECP-INV / SECP-MUL-POINT / SECP-MUL-2 from
-;; the portable field.lisp / point.lisp with the fast x86-64 backend — muffle the
+;; the portable field.lisp / point.lisp with the fast limb backend — muffle the
 ;; expected redefinition warnings (the portable versions remain the fallback on
 ;; other architectures and the differential oracle).
 (declaim (sb-ext:muffle-conditions sb-kernel:redefinition-warning))

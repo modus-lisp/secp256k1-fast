@@ -71,9 +71,10 @@
           (setf (aref bad 33) (logxor (aref bad 33) 1))
           (check (format nil "schnorr reject tampered #~d" i) (schnorr:schnorr-verify px m bad) nil))))
 
-    #+(and sbcl x86-64)
+    #+(and sbcl (or x86-64 arm64))
     (progn
-      (format t "== x86-64 VOP limb field backend ==~%")
+      (format t "== VOP limb field backend (~a) ==~%"
+              #+x86-64 "x86-64" #+(and arm64 (not x86-64)) "arm64")
       (let ((p secp:*secp256k1-p*) (om (secp::mkfe)) (oa (secp::mkfe)) (os (secp::mkfe))
             (mok t) (aok t) (sok t))
         (dotimes (i 20000)
@@ -84,9 +85,22 @@
         (check "%mul256+%reducep fmul! == (* a b) mod p (20k)" mok t)
         (check "%fadd == (+ a b) mod p (20k)" aok t)
         (check "%fsub == (- a b) mod p (20k)" sok t))
+      ;; Direct differential check of the scalar-field VOP path: secp-inv-mod with
+      ;; m=n runs the Montgomery inverse (%mul256 + %montredn) — the one VOP not
+      ;; covered by the F_p loop above.  Oracle is mod-expt a^(n-2) (portable
+      ;; bignum, independent of the VOPs); also assert a·a⁻¹ ≡ 1 (mod n).
+      (let ((n secp:*secp256k1-n*) (niok t))
+        (dotimes (i 5000)
+          (let* ((a (+ 1 (random (1- n))))
+                 (got (secp:secp-inv-mod a n)))
+            (unless (and (= got (secp:mod-expt a (- n 2) n)) (= 1 (mod (* a got) n)))
+              (setf niok nil))))
+        (check "%montredn n-inverse == a^(n-2) mod n (5k)" niok t))
       ;; NOTE: every ECDSA/Schnorr/pubkey test above now runs through the limb
-      ;; backend (secp-mul-point/secp-mul-2 are redefined on x86-64); the MUL
-      ;; encoding is byte-identical to modus's verified encoder (cross-checked).
+      ;; backend (secp-mul-point/secp-mul-2 are redefined on x86-64 and arm64),
+      ;; so the whole suite is the per-architecture differential oracle for the
+      ;; VOPs.  On x86-64 the MUL encoding is also byte-identical to modus's
+      ;; verified encoder (cross-checked).
       )
 
     (format t "~%~a (~d failure~:p)~%" (if (zerop *fail*) "ALL PASS" "FAILURES") *fail*)
