@@ -85,6 +85,17 @@
         (check "%mul256+%reducep fmul! == (* a b) mod p (20k)" mok t)
         (check "%fadd == (+ a b) mod p (20k)" aok t)
         (check "%fsub == (- a b) mod p (20k)" sok t))
+      ;; Direct differential check of the scalar-field VOP path: secp-inv-mod with
+      ;; m=n runs the Montgomery inverse (%mul256 + %montredn) — the one VOP not
+      ;; covered by the F_p loop above.  Oracle is mod-expt a^(n-2) (portable
+      ;; bignum, independent of the VOPs); also assert a·a⁻¹ ≡ 1 (mod n).
+      (let ((n secp:*secp256k1-n*) (niok t))
+        (dotimes (i 5000)
+          (let* ((a (+ 1 (random (1- n))))
+                 (got (secp:secp-inv-mod a n)))
+            (unless (and (= got (secp:mod-expt a (- n 2) n)) (= 1 (mod (* a got) n)))
+              (setf niok nil))))
+        (check "%montredn n-inverse == a^(n-2) mod n (5k)" niok t))
       ;; NOTE: every ECDSA/Schnorr/pubkey test above now runs through the limb
       ;; backend (secp-mul-point/secp-mul-2 are redefined on x86-64 and arm64),
       ;; so the whole suite is the per-architecture differential oracle for the
