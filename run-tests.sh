@@ -12,6 +12,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SBCL=${SBCL:-sbcl}
 
 exec "$SBCL" --non-interactive \
+  --eval "(require :asdf)" \
   --eval "(push #p\"$HERE/\" asdf:*central-registry*)" \
   --eval '(handler-case
             (progn
