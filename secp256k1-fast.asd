@@ -23,13 +23,18 @@
                  (:file "point")
                  (:file "ecdsa")
                  (:file "schnorr")
-                 ;; x86-64 inline-asm field + limb scalar-mult backend (SBCL VOPs).
-                 ;; VOPs first (must be registered before their callers compile),
-                 ;; then the backend, which redefines secp-mul-point / secp-mul-2
-                 ;; to run on limb arrays.  Portable field.lisp / point.lisp stay
-                 ;; as the fallback + differential oracle.
-                 (:file "field-vops-x86-64" :if-feature (:and :sbcl :x86-64))
-                 (:file "field-x86-64" :if-feature (:and :sbcl :x86-64)))))
+                 ;; Inline-asm field + limb scalar-mult backend (SBCL VOPs).
+                 ;; The per-architecture VOP file comes FIRST (the VOPs must be
+                 ;; registered before their callers compile), then field-limb.lisp
+                 ;; — the architecture-neutral backend that calls those VOPs and
+                 ;; redefines secp-mul-point / secp-mul-2 to run on limb arrays.
+                 ;; Each arch supplies the same five VOPs (%mul256 %reducep %fadd
+                 ;; %fsub %montredn); field-limb.lisp names only those symbols.
+                 ;; Portable field.lisp / point.lisp stay as the fallback +
+                 ;; differential oracle (and validate the VOPs on every arch).
+                 (:file "field-vops-x86-64"  :if-feature (:and :sbcl :x86-64))
+                 (:file "field-vops-aarch64" :if-feature (:and :sbcl :arm64))
+                 (:file "field-limb" :if-feature (:and :sbcl (:or :x86-64 :arm64))))))
   :in-order-to ((test-op (test-op "secp256k1-fast/test"))))
 
 (defsystem "secp256k1-fast/test"
