@@ -103,6 +103,20 @@
       ;; verified encoder (cross-checked).
       )
 
+    (format t "~%== constant-time k*G (vs variable-time path) ==~%")
+    (check "ct-mul-g available on this backend" (secp:ct-mul-g-available-p) t)
+    (let ((n secp:*secp256k1-n*) (ok t))
+      (dolist (k (list* 1 2 15 16 17 255 256 (1- n) (ash n -1)
+                        (loop repeat 64 collect (1+ (random (1- n))))))
+        (let ((a (secp:secp-mul-point k (secp:secp-generator)))
+              (b (secp:ct-mul-g k)))
+          (unless (if (secp:secp-inf-p a) (secp:secp-inf-p b)
+                      (and (not (secp:secp-inf-p b))
+                           (= (secp:secp-x a) (secp:secp-x b))
+                           (= (secp:secp-y a) (secp:secp-y b))))
+            (setf ok nil))))
+      (check "ct-mul-g == secp-mul-point (edge cases + 64 random)" ok t))
+
     (format t "~%~a (~d failure~:p)~%" (if (zerop *fail*) "ALL PASS" "FAILURES") *fail*)
     (when (plusp *fail*) (error "secp256k1-fast: ~d test failure(s)" *fail*))
     t))

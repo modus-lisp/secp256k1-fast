@@ -26,9 +26,9 @@
         (cons x (if (evenp y) y (- (p) y)))))))
 
 (defun pubkey-xonly (privkey-int)
-  "32-byte x-only public key for a private-key integer."
+  "32-byte x-only public key for a private-key integer (constant-time)."
   (secp:secp-init)
-  (secp:int-to-bytes32 (secp:secp-x (secp:secp-mul-point privkey-int (secp:secp-generator)))))
+  (secp:int-to-bytes32 (secp:secp-x (secp:ct-mul-g privkey-int))))
 
 (defun schnorr-verify (pubkey32 msg32 sig64)
   "T iff SIG64 is a valid BIP-340 signature of MSG32 under x-only PUBKEY32."
@@ -56,16 +56,16 @@
   "BIP-340 sign.  Returns a 64-byte signature."
   (secp:secp-init)
   (let* ((dp privkey-int)
-         (pt (secp:secp-mul-point dp (secp:secp-generator)))
+         (pt (secp:ct-mul-g dp))
          (d (if (evenp (secp:secp-y pt)) dp (- (n) dp)))
          (px (secp:int-to-bytes32 (secp:secp-x pt)))
          (tt (logxor d (secp:bytes-to-int (tagged-hash "BIP0340/aux" aux))))
          (rand (tagged-hash "BIP0340/nonce" (cat (secp:int-to-bytes32 tt) px msg32)))
          (k0 (mod (secp:bytes-to-int rand) (n))))
     (when (zerop k0) (error "schnorr-sign: k=0"))
-    (let* ((rpt (secp:secp-mul-point k0 (secp:secp-generator)))
+    (let* ((rpt (secp:ct-mul-g k0))
            (k (if (evenp (secp:secp-y rpt)) k0 (- (n) k0)))
            (rx (secp:int-to-bytes32 (secp:secp-x rpt)))
            (e (mod (secp:bytes-to-int (tagged-hash "BIP0340/challenge" (cat rx px msg32))) (n)))
-           (sig-s (secp:int-to-bytes32 (mod (+ k (* e d)) (n)))))
+           (sig-s (secp:int-to-bytes32 (mod (+ k (secp:ct-nmul e d)) (n)))))
       (cat rx sig-s))))

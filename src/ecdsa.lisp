@@ -42,11 +42,11 @@
          (z (mod (bytes-to-int hash-bytes) n)))
     (loop
       (let* ((k (rfc6979-k privkey-int hash-bytes))
-             (kg (secp-mul-point k (secp-generator)))
+             (kg (ct-mul-g k))                 ; constant-time nonce point
              (r (mod (secp-x kg) n)))
         (when (zerop r) (return-from ecdsa-sign-raw nil))
-        (let* ((k-inv (mod (secp-inv-mod k n) n))
-               (s (mod (* k-inv (mod (+ z (* r privkey-int)) n)) n)))
+        (let* ((k-inv (mod (secp-inv-mod k n) n))               ; secp-inv-mod is constant-time for n
+               (s (ct-nmul k-inv (mod (+ z (ct-nmul r privkey-int)) n))))
           (when (zerop s) (return-from ecdsa-sign-raw nil))
           (let* ((y (secp-y kg))
                  (high-s? (> s (ash n -1)))
