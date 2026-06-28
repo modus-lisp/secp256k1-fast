@@ -89,11 +89,22 @@ scan all 16, accumulate entry*flag where flag = (i==digit)."
 
 (defvar *ct-ax* (mkfe)) (defvar *ct-ay* (mkfe)) (defvar *ct-az* (mkfe))
 (defvar *ct-sx* (mkfe)) (defvar *ct-sy* (mkfe)) (defvar *ct-sz* (mkfe))
+(defvar *ct-zinv* (mkfe)) (defvar *ct-rx* (mkfe)) (defvar *ct-ry* (mkfe))
 
 (defun %ct-nibbles (k)
-  "The 64 base-16 digits of K (0 <= K < 2^256), index = window number."
-  (let ((d (make-array 64 :element-type 'fixnum)))
-    (dotimes (w 64 d) (setf (aref d w) (ldb (byte 4 (* 4 w)) k)))))
+  "The 64 base-16 digits of K (0 <= K < 2^256), index = window number.  K is
+converted to a fixed 4-limb form ONCE (via i->fe); the per-nibble slicing then
+runs on 32-bit fixnum halves, so it does the same work for every scalar rather
+than touching the secret bignum 64 times (which would leak its magnitude)."
+  (let ((kf (i->fe k)) (d (make-array 64 :element-type 'fixnum)))
+    (declare (type fe kf) (type (simple-array fixnum (64)) d))
+    (dotimes (i 4 d)
+      (let ((lo (logand (aref kf i) #xFFFFFFFF))     ; low 32 bits  (fixnum)
+            (hi (ash (aref kf i) -32)))              ; high 32 bits (fixnum)
+        (declare (type (unsigned-byte 32) lo hi))
+        (dotimes (j 8)
+          (setf (aref d (+ (* i 16) j))      (logand (ash lo (* -4 j)) 15)
+                (aref d (+ (* i 16) 8 j))    (logand (ash hi (* -4 j)) 15)))))))
 
 (defun ct-mul-g (k)
   "Constant-time K*G for 0 <= K < n.  Returns an affine (x . y) point, or the
@@ -112,11 +123,19 @@ private keys in range)."
       (%ct-select (aref nib w))                        ; sel = nibble*G  (CT table read)
       (ct-cadd! sx sy sz  ax ay az  *ct-selx* *ct-sely* *ct-selz*)
       (fcopy! ax sx) (fcopy! ay sy) (fcopy! az sz))
-    ;; projective -> affine: (X/Z, Y/Z)
+    ;; projective -> affine: (X/Z, Y/Z), entirely in the FE/VOP domain so the
+    ;; secret-derived coordinates never become variable-length bignums.  Z is
+    ;; canonicalized first (fadd!/fsub! leave results in [0,2^256), so an infinity
+    ;; result Z=p must reduce to 0 before the zero test).  f->i runs only on the
+    ;; final affine x,y — which are the public output point.
+    (fmul! az az *one-fe*)                            ; canonicalize Z to [0,p)
     (if (fzero? az)
         *secp256k1-infinity*
-        (let ((zi (secp-inv (f->i az))))
-          (cons (secp-mod (* (f->i ax) zi)) (secp-mod (* (f->i ay) zi)))))))
+        (progn
+          (fe-inv! *ct-zinv* az)                      ; Z^-1 via constant-time Fermat chain
+          (fmul! *ct-rx* ax *ct-zinv*)                ; X/Z
+          (fmul! *ct-ry* ay *ct-zinv*)                ; Y/Z
+          (cons (f->i *ct-rx*) (f->i *ct-ry*))))))
 
 (defun ct-mul-g-available-p () t)
 
