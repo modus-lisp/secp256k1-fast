@@ -129,9 +129,21 @@
   (secp-init)
   (cons *secp256k1-gx* *secp256k1-gy*))
 
+;; CT-MUL-G: multiply a *secret* scalar by the base point G in constant time.
+;; Portable fallback = the ordinary (variable-time) multiply; the limb backend
+;; (ct.lisp) overrides this with a genuinely constant-time implementation.
+;; CT-MUL-G-AVAILABLE-P reports whether the constant-time path is in effect.
+(defun ct-mul-g (k) (secp-mul-point k (secp-generator)))
+(defun ct-mul-g-available-p () nil)
+
+;; CT-NMUL: a*b mod n for secret operands.  Portable fallback is the bignum
+;; product; the limb backend (ct.lisp) overrides it with a constant-time
+;; Montgomery multiply.
+(defun ct-nmul (a b) (mod (* a b) *secp256k1-n*))
+
 (defun secp-pubkey (privkey)
-  "Public-key point from a private-key integer."
-  (secp-mul-point privkey (secp-generator)))
+  "Public-key point from a private-key integer (constant-time in the secret)."
+  (ct-mul-g privkey))
 
 (defun secp-on-curve-p (p)
   "Is P on y^2 = x^3 + 7?"

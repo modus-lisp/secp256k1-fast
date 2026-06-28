@@ -4,7 +4,7 @@
   (:use #:cl)
   (:local-nicknames (#:secp #:secp256k1-fast) (#:schnorr #:secp256k1-fast.schnorr)
                     (#:sha #:secp256k1-fast.hash))
-  (:export #:run-all #:cross-check #:bench #:thread-test))
+  (:export #:run-all #:cross-check #:bench #:thread-test #:ct-timing))
 
 (in-package #:secp256k1-fast.test)
 
@@ -103,6 +103,48 @@
       ;; verified encoder (cross-checked).
       )
 
+    (format t "~%== constant-time k*G (vs variable-time path) ==~%")
+    (check "ct-mul-g available on this backend" (secp:ct-mul-g-available-p) t)
+    (let ((n secp:*secp256k1-n*) (ok t))
+      (dolist (k (list* 1 2 15 16 17 255 256 (1- n) (ash n -1)
+                        (loop repeat 64 collect (1+ (random (1- n))))))
+        (let ((a (secp:secp-mul-point k (secp:secp-generator)))
+              (b (secp:ct-mul-g k)))
+          (unless (if (secp:secp-inf-p a) (secp:secp-inf-p b)
+                      (and (not (secp:secp-inf-p b))
+                           (= (secp:secp-x a) (secp:secp-x b))
+                           (= (secp:secp-y a) (secp:secp-y b))))
+            (setf ok nil))))
+      (check "ct-mul-g == secp-mul-point (edge cases + 64 random)" ok t))
+
+    ;; Constant-time property (deterministic): ct-mul-g must perform the SAME
+    ;; number of point operations for every scalar.  We count the non-inlined
+    ;; ct-cadd! / %ct-select calls (the field ops below them are inlined, and
+    ;; fixed-count per call) across wildly different scalars; the variable-time
+    ;; path is shown alongside to vary.
+    (when (secp:ct-mul-g-available-p)
+      (let ((n secp:*secp256k1-n*)
+            (o-cadd (symbol-function 'secp::ct-cadd!))
+            (o-sel  (symbol-function 'secp::%ct-select))
+            (o-jadd (symbol-function 'secp::jadd!))
+            (o-jdbl (symbol-function 'secp::jdbl!))
+            (cadd 0) (sel 0) (jpt 0) (ct-profiles '()) (vt-counts '()))
+        (secp:ct-mul-g 7)               ; warm the precomputed table
+        (setf (symbol-function 'secp::ct-cadd!) (lambda (&rest a) (incf cadd) (apply o-cadd a))
+              (symbol-function 'secp::%ct-select) (lambda (&rest a) (incf sel) (apply o-sel a))
+              (symbol-function 'secp::jadd!) (lambda (&rest a) (incf jpt) (apply o-jadd a))
+              (symbol-function 'secp::jdbl!) (lambda (&rest a) (incf jpt) (apply o-jdbl a)))
+        (unwind-protect
+             (dolist (k (list 1 (1- n) (ash 1 255) (1+ (random n)) (1+ (random n)) (1+ (random n))))
+               (setf cadd 0 sel 0) (secp:ct-mul-g k) (pushnew (cons cadd sel) ct-profiles :test #'equal)
+               (setf jpt 0) (secp:secp-mul-point k (secp:secp-generator)) (pushnew jpt vt-counts))
+          (setf (symbol-function 'secp::ct-cadd!) o-cadd (symbol-function 'secp::%ct-select) o-sel
+                (symbol-function 'secp::jadd!) o-jadd (symbol-function 'secp::jdbl!) o-jdbl))
+        (format t "  (ct-mul-g point-op profile: ~a;  variable-time counts: ~a)~%"
+                ct-profiles (sort (copy-list vt-counts) #'<))
+        (check "ct-mul-g op-count is scalar-independent" (length ct-profiles) 1)
+        (check "variable-time path op-count DOES vary (sanity)" (> (length vt-counts) 1) t)))
+
     (format t "~%~a (~d failure~:p)~%" (if (zerop *fail*) "ALL PASS" "FAILURES") *fail*)
     (when (plusp *fail*) (error "secp256k1-fast: ~d test failure(s)" *fail*))
     t))
@@ -188,3 +230,22 @@
           (format t "  ~d threads    : ~,0f verify/s aggregate (~,1fx)~%"
                   nthreads (/ (* nthreads per 2) tn) (/ (/ (* nthreads per 2) tn) (/ (* per 2) t1)))
           (zerop errs))))))
+
+(defun ct-timing (&optional (ct-iters 800) (vt-iters 20000))
+  "Empirical timing: per-call ms for k*G across scalar classes.  The constant-
+time path should be flat; the variable-time path tracks the scalar.  (Wall-clock
+on a shared host is noisy — the op-count check in RUN-ALL is the hard test.)"
+  (secp:secp-init)
+  (secp:ct-mul-g 7)
+  (let* ((n secp:*secp256k1-n*) (g (secp:secp-generator))
+         (classes (list (cons "k=1" 1) (cons "k=n-1" (1- n)) (cons "k=2^255" (ash 1 255))
+                        (cons "random" (1+ (random n))) (cons "random2" (1+ (random n))))))
+    (flet ((ms (fn k iters)
+             (let ((t0 (get-internal-real-time)))
+               (dotimes (i iters) (funcall fn k))
+               (/ (* 1000.0 (- (get-internal-real-time) t0)) internal-time-units-per-second iters))))
+      (format t "~&~14a | ct-mul-g ms | var-time ms~%" "scalar class")
+      (dolist (c classes)
+        (format t "~14a |   ~6,4f    |   ~7,5f~%" (car c)
+                (ms (lambda (k) (secp:ct-mul-g k)) (cdr c) ct-iters)
+                (ms (lambda (k) (secp:secp-mul-point k g)) (cdr c) vt-iters))))))

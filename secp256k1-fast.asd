@@ -34,7 +34,10 @@
                  ;; differential oracle (and validate the VOPs on every arch).
                  (:file "field-vops-x86-64"  :if-feature (:and :sbcl :x86-64))
                  (:file "field-vops-aarch64" :if-feature (:and :sbcl :arm64))
-                 (:file "field-limb" :if-feature (:and :sbcl (:or :x86-64 :arm64))))))
+                 (:file "field-limb" :if-feature (:and :sbcl (:or :x86-64 :arm64)))
+                 ;; constant-time k*G for secret scalars (overrides the portable
+                 ;; CT-MUL-G fallback); needs the branchless limb field ops.
+                 (:file "ct" :if-feature (:and :sbcl (:or :x86-64 :arm64))))))
   :in-order-to ((test-op (test-op "secp256k1-fast/test"))))
 
 (defsystem "secp256k1-fast/test"
