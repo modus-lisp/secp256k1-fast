@@ -5,19 +5,48 @@ on:
   workflow_dispatch:
 jobs:
   test:
-    # Run on both architectures so each field-vops-* backend is exercised by the
-    # in-tree differential oracle (the suite runs entirely through the limb VOPs).
+    # Two axes, and BOTH are load-bearing.
+    #
+    # arch — each field-vops-* backend is a different file of hand-written assembly, exercised
+    #        by the in-tree differential oracle (the suite runs entirely through the limb VOPs).
+    #
+    # sbcl — the assembler's spelling of one-operand instructions CHANGED: (inst mul rax src) was
+    #        the API through 2.2, deprecated in 2.3, and removed in 2.5, where it is a hard error.
+    #        apt's SBCL predates all of that, so an arch-only matrix stayed green while the
+    #        library could not build on current SBCL for the most common architecture.  Pin at
+    #        least one modern SBCL here or the next such change is found by a user.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86-64, runner: ubuntu-latest }
-          - { arch: arm64,  runner: ubuntu-24.04-arm }
-    name: test (${{ matrix.arch }})
+          - { arch: x86-64, runner: ubuntu-latest,      sbcl: apt }
+          - { arch: x86-64, runner: ubuntu-latest,      sbcl: "2.5.6" }
+          - { arch: arm64,  runner: ubuntu-24.04-arm,   sbcl: apt }
+          - { arch: arm64,  runner: ubuntu-24.04-arm,   sbcl: "2.5.6" }
+    name: test (${{ matrix.arch }}, sbcl ${{ matrix.sbcl }})
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install SBCL
+
+      - name: Install SBCL (apt)
+        if: matrix.sbcl == 'apt'
         run: sudo apt-get update && sudo apt-get install -y sbcl
+
+      - name: Install SBCL (from source, pinned)
+        if: matrix.sbcl != 'apt'
+        run: |
+          set -eux
+          sudo apt-get update && sudo apt-get install -y sbcl zlib1g-dev   # host compiler
+          curl -sL -o sbcl.tar.bz2 \
+            "https://downloads.sourceforge.net/project/sbcl/sbcl/${{ matrix.sbcl }}/sbcl-${{ matrix.sbcl }}-source.tar.bz2"
+          tar xf sbcl.tar.bz2
+          cd "sbcl-${{ matrix.sbcl }}"
+          sh make.sh --xc-host='sbcl --non-interactive --no-userinit --no-sysinit --disable-debugger'
+          sudo sh install.sh
+          hash -r
+
+      - name: Which SBCL
+        run: sbcl --version
+
       - name: Run test suite
         run: ./run-tests.sh
