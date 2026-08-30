@@ -41,7 +41,13 @@ jobs:
             "https://downloads.sourceforge.net/project/sbcl/sbcl/${{ matrix.sbcl }}/sbcl-${{ matrix.sbcl }}-source.tar.bz2"
           tar xf sbcl.tar.bz2
           cd "sbcl-${{ matrix.sbcl }}"
-          sh make.sh --xc-host='sbcl --non-interactive --no-userinit --no-sysinit --disable-debugger'
+          # NO --non-interactive HERE.  It implies --quit, so the host SBCL exits
+          # before reading the build forms make.sh pipes to it on stdin: the step
+          # "building cross-compiler, and doing first genesis" prints a banner,
+          # finishes in 0.00 seconds, emits no genesis output, and the next phase
+          # dies on "No rule to make target 'genesis/Makefile.features'" — which
+          # reads like a broken tarball and is a flag.
+          sh make.sh --xc-host='sbcl --disable-debugger --no-sysinit --no-userinit'
           sudo sh install.sh
           hash -r
 
