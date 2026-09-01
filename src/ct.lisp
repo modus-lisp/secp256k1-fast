@@ -148,3 +148,52 @@ private keys in range)."
     (nmul! o1 (i->fe a) *nR2*)        ; o1 = a*R mod n  (into Montgomery form)
     (nmul! o2 o1 (i->fe b))           ; o2 = (a*R)*b*R^-1 = a*b mod n
     (f->i o2)))
+
+;;; ---------------------------------------------------------------------------
+;;; Thread safety
+;;;
+;;; The scratch above is module-level, which is the right call for the
+;;; single-threaded fast path and wrong the moment two threads derive keys or
+;;; sign at the same time: they overwrite each other's intermediates and the
+;;; result comes back as the point at infinity, or — worse — a valid-looking
+;;; wrong point.  CT-MUL-G is reached from SECP-PUBKEY, ECDSA-SIGN-RAW and
+;;; SCHNORR-SIGN, so this covers key derivation and both signature schemes.
+;;;
+;;; FIELD-LIMB.LISP's WITH-FRESH-SCRATCH deliberately does NOT cover these: it
+;;; was written for parallel *verification*, which goes through SECP-MUL-POINT
+;;; and touches a disjoint set of buffers.  A caller doing concurrent signing
+;;; needs this one as well — WITH-FRESH-SCRATCH alone silently does nothing for
+;;; CT-MUL-G, which is a confusing way to find out.
+;;;
+;;; *CT-GTAB* and *CT-B3* are NOT rebound: the table is read-only once built, so
+;;; sharing it is both safe and the point (rebinding would rebuild 16 point
+;;; multiplications per thread).  It is built eagerly below so threads never race
+;;; to construct it.
+;;; ---------------------------------------------------------------------------
+
+(defmacro with-fresh-ct-scratch (&body body)
+  "Bind CT-MUL-G's scratch for this thread.  Wrap any thread that derives public
+   keys or signs; without it, concurrent callers corrupt each other.
+
+   This ALSO binds the field-arithmetic scratch (WITH-FRESH-SCRATCH), because
+   CT-CADD! bottoms out in FMUL!/FADD! and those have their own module-level
+   buffers.  Binding only one of the two leaves the other shared, which fails
+   exactly as loudly as binding neither — so this macro is deliberately
+   sufficient on its own rather than something callers must remember to pair."
+  `(with-fresh-scratch
+     (%with-ct-buffers-only ,@body)))
+
+(defmacro %with-ct-buffers-only (&body body)
+  `(let ((*ct-t0* (mkfe)) (*ct-t1* (mkfe)) (*ct-t2* (mkfe))
+         (*ct-t3* (mkfe)) (*ct-t4* (mkfe))
+         (*ct-selx* (mkfe)) (*ct-sely* (mkfe)) (*ct-selz* (mkfe))
+         (*ct-tmp* (mkfe)) (*ct-self* (mkfe))
+         (*ct-ax* (mkfe)) (*ct-ay* (mkfe)) (*ct-az* (mkfe))
+         (*ct-sx* (mkfe)) (*ct-sy* (mkfe)) (*ct-sz* (mkfe))
+         (*ct-zinv* (mkfe)) (*ct-rx* (mkfe)) (*ct-ry* (mkfe)))
+     ,@body))
+
+;; Build the generator table at load time, so a first concurrent call can't have
+;; two threads constructing it at once.
+(secp-init)
+(%ct-table)

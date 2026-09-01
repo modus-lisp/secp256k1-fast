@@ -145,6 +145,9 @@
         (check "ct-mul-g op-count is scalar-independent" (length ct-profiles) 1)
         (check "variable-time path op-count DOES vary (sanity)" (> (length vt-counts) 1) t)))
 
+    (format t "~%== thread safety (concurrent key derivation) ==~%")
+    (thread-safety)
+
     (format t "~%~a (~d failure~:p)~%" (if (zerop *fail*) "ALL PASS" "FAILURES") *fail*)
     (when (plusp *fail*) (error "secp256k1-fast: ~d test failure(s)" *fail*))
     t))
@@ -230,6 +233,37 @@
           (format t "  ~d threads    : ~,0f verify/s aggregate (~,1fx)~%"
                   nthreads (/ (* nthreads per 2) tn) (/ (/ (* nthreads per 2) tn) (/ (* per 2) t1)))
           (zerop errs))))))
+
+(defun thread-safety (&optional (threads 8) (iters 150))
+  "Concurrent CT-MUL-G must agree with the single-threaded answer.
+
+   The scratch in CT.LISP is module-level, so without WITH-FRESH-CT-SCRATCH
+   concurrent callers overwrite each other's intermediates and the result comes
+   back as the point at infinity or a valid-looking WRONG point — silent key
+   corruption, which is about the worst failure mode this library has.  Every
+   caller that derives public keys or signs from more than one thread depends on
+   this, so it is a hard check and not a benchmark.
+
+   Uses SB-THREAD directly: the system has no dependencies and this test is not
+   going to be what introduces one."
+  #-sb-thread (progn (format t "~&(no threads in this build — skipped)~%") t)
+  #+sb-thread
+  (let* ((k #x1111111111111111111111111111111111111111111111111111111111111111)
+         (want (secp:secp-pubkey k))
+         (bad 0)
+         (lock (sb-thread:make-mutex)))
+    (mapc #'sb-thread:join-thread
+          (loop repeat threads
+                collect (sb-thread:make-thread
+                         (lambda ()
+                           (secp:with-fresh-ct-scratch
+                             (dotimes (i iters)
+                               (let ((got (handler-case (secp:secp-pubkey k)
+                                            (error () nil))))
+                                 (unless (equal got want)
+                                   (sb-thread:with-mutex (lock) (incf bad))))))))))
+    (check "concurrent ct-mul-g agrees with single-threaded"
+           (format nil "~d wrong" bad) "0 wrong")))
 
 (defun ct-timing (&optional (ct-iters 800) (vt-iters 20000))
   "Empirical timing: per-call ms for k*G across scalar classes.  The constant-
