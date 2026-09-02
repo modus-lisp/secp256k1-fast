@@ -37,7 +37,9 @@
                  (:file "field-limb" :if-feature (:and :sbcl (:or :x86-64 :arm64)))
                  ;; constant-time k*G for secret scalars (overrides the portable
                  ;; CT-MUL-G fallback); needs the branchless limb field ops.
-                 (:file "ct" :if-feature (:and :sbcl (:or :x86-64 :arm64))))))
+                 (:file "ct" :if-feature (:and :sbcl (:or :x86-64 :arm64)))
+                 ;; Last: wraps the entry points above in per-thread scratch.
+                 (:file "threadsafe" :if-feature (:and :sbcl (:or :x86-64 :arm64))))))
   :in-order-to ((test-op (test-op "secp256k1-fast/test"))))
 
 (defsystem "secp256k1-fast/test"
