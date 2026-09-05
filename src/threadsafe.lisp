@@ -31,3 +31,11 @@
 (%self-protecting secp-inv-mod (a m))
 (%self-protecting ecdsa-sign-raw (privkey-int hash-bytes))
 (%self-protecting ecdsa-verify (pubkey-pt hash-bytes r s))
+;; The double-scalar multiplication behind signature verification, and the
+;; Schnorr entry points built on it.  cl-deposits found this one: a relay reader
+;; thread verifying Nostr event signatures while a worker verified ledger
+;; cosignatures made valid signatures fail, intermittently, in one process.
+(%self-protecting secp-mul-2 (k1 p1 k2 p2))
+(%self-protecting secp256k1-fast.schnorr:schnorr-sign (privkey-int msg32 &optional aux))
+(%self-protecting secp256k1-fast.schnorr:schnorr-verify (pubkey32 msg32 sig64))
+(%self-protecting secp256k1-fast.schnorr:pubkey-xonly (privkey-int))
