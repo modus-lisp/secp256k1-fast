@@ -36,6 +36,10 @@
 ;; thread verifying Nostr event signatures while a worker verified ledger
 ;; cosignatures made valid signatures fail, intermittently, in one process.
 (%self-protecting secp-mul-2 (k1 p1 k2 p2))
-(%self-protecting secp256k1-fast.schnorr:schnorr-sign (privkey-int msg32 &optional aux))
+(let ((inner (fdefinition 'secp256k1-fast.schnorr:schnorr-sign)))
+  (setf (fdefinition 'secp256k1-fast.schnorr:schnorr-sign)
+        (lambda (privkey-int msg32 &optional (aux nil aux-p))
+          (with-fresh-ct-scratch
+            (if aux-p (funcall inner privkey-int msg32 aux) (funcall inner privkey-int msg32))))))
 (%self-protecting secp256k1-fast.schnorr:schnorr-verify (pubkey32 msg32 sig64))
 (%self-protecting secp256k1-fast.schnorr:pubkey-xonly (privkey-int))
