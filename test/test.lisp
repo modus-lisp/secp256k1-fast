@@ -263,6 +263,26 @@
                                  (unless (equal got want)
                                    (sb-thread:with-mutex (lock) (incf bad))))))))))
     (check "concurrent ct-mul-g agrees with single-threaded"
+           (format nil "~d wrong" bad) "0 wrong"))
+  ;; The affine entry points share the limb backend's scratch through SECP-INV.
+  ;; A taproot tweak (lift_x, then P + t*G) computed on one thread while another
+  ;; verified signatures came out as a valid-looking wrong point (cl-deposits).
+  ;; No WITH-FRESH-CT-SCRATCH here on purpose: the entry points must protect themselves.
+  (let* ((x (secp:secp-x (secp:secp-pubkey #x2222222222222222222222222222222222222222222222222222222222222222)))
+         (p (secp256k1-fast.schnorr:lift-x x))
+         (tg (secp:secp-pubkey #x3333))
+         (want (secp:secp-add-points p tg))
+         (bad 0)
+         (lock (sb-thread:make-mutex)))
+    (mapc #'sb-thread:join-thread
+          (loop repeat threads
+                collect (sb-thread:make-thread
+                         (lambda ()
+                           (dotimes (i iters)
+                             (unless (and (equal (secp256k1-fast.schnorr:lift-x x) p)
+                                          (equal (secp:secp-add-points p tg) want))
+                               (sb-thread:with-mutex (lock) (incf bad))))))))
+    (check "concurrent lift-x and affine add agree with single-threaded (unwrapped callers)"
            (format nil "~d wrong" bad) "0 wrong")))
 
 (defun ct-timing (&optional (ct-iters 800) (vt-iters 20000))

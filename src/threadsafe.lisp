@@ -43,3 +43,13 @@
             (if aux-p (funcall inner privkey-int msg32 aux) (funcall inner privkey-int msg32))))))
 (%self-protecting secp256k1-fast.schnorr:schnorr-verify (pubkey32 msg32 sig64))
 (%self-protecting secp256k1-fast.schnorr:pubkey-xonly (privkey-int))
+
+;; The affine point and field entry points.  cl-deposits found these: a node
+;; building a taproot output (lift_x, then an affine add of t*G) on its worker
+;; thread while the relay reader verified signatures got a valid-looking but
+;; wrong output key, so quorum members disagreed on their own reserves script.
+(%self-protecting secp-add-points (p1 p2))
+(%self-protecting secp-double (p))
+(%self-protecting secp-on-curve-p (p))
+(%self-protecting secp-inv (a))          ; the limb-backend inverse, under every affine op
+(%self-protecting secp256k1-fast.schnorr:lift-x (x))
