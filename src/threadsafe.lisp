@@ -53,3 +53,4 @@
 (%self-protecting secp-on-curve-p (p))
 (%self-protecting secp-inv (a))          ; the limb-backend inverse, under every affine op
 (%self-protecting secp256k1-fast.schnorr:lift-x (x))
+(%self-protecting ct-nmul (a b))       ; Montgomery scalar multiply: shares *mont-scratch*
