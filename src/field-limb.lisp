@@ -48,9 +48,15 @@
 (defun fdbl! (out a) (fadd! out a a))
 (defun fcopy! (out a) (declare (type fe out a)) (dotimes (i 4) (setf (aref out i) (aref a i))))
 (defun fzero? (a) (declare (type fe a)) (and (zerop (aref a 0)) (zerop (aref a 1)) (zerop (aref a 2)) (zerop (aref a 3))))
-(defun i->fe (x) (let ((a (mkfe))) (dotimes (i 4 a) (setf (aref a i) (ldb (byte 64 (* i 64)) x)))))
+;; Limbs are peeled with a CONSTANT mask and a CONSTANT shift, never with
+;; (ldb (byte 64 (* i 64)) x).  SBCL 2.6.8 (x86-64) open-codes a variable-position
+;; LDB on an integer as a two-digit SHRD whose shift-count TN can be packed into
+;; the same register as the digit it loads (MOV RDI,RAX clobbers the count, then
+;; MOV ECX,EDI) -- so under register pressure (e.g. i->fe inlined next to FADD!)
+;; every limb came out shifted by garbage.  SBCL 2.2.9 called ASH and was correct.
+(defun i->fe (x) (let ((a (mkfe))) (dotimes (i 4 a) (setf (aref a i) (logand x #xFFFFFFFFFFFFFFFF) x (ash x -64)))))
 (declaim (inline i->fe!))
-(defun i->fe! (out x) (declare (type fe out)) (dotimes (i 4 out) (setf (aref out i) (ldb (byte 64 (* i 64)) x))))
+(defun i->fe! (out x) (declare (type fe out)) (dotimes (i 4 out) (setf (aref out i) (logand x #xFFFFFFFFFFFFFFFF) x (ash x -64))))
 (defun f->i (a) (declare (type fe a)) (logior (aref a 0) (ash (aref a 1) 64) (ash (aref a 2) 128) (ash (aref a 3) 192)))
 
 ;;; Field inverse a^(p-2) mod p via libsecp256k1's addition chain (~255 squarings
