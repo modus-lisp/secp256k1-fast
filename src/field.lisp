@@ -83,3 +83,8 @@
              (new-t1 (- t0 (* q t1))))
         (setf r0 r1 r1 new-r1 t0 t1 t1 new-t1)))
     (if (< t0 0) (+ t0 *secp256k1-p*) t0)))
+
+(defun secp-sqrt-cand (a)
+  "a^((p+1)/4) mod p: a square root of A when one exists (the caller checks).
+   Portable fallback; field-limb.lisp replaces it with an addition chain."
+  (mod-expt a (floor (+ *secp256k1-p* 1) 4) *secp256k1-p*))

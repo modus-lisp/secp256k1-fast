@@ -16,7 +16,7 @@
    #:*secp256k1-p* #:*secp256k1-n* #:*secp256k1-gx* #:*secp256k1-gy*
    #:secp-init #:secp-generator #:bytes-to-int #:int-to-bytes32 #:mod-expt
    ;; field (mod p) and curve ops
-   #:secp-mod #:secp-add #:secp-sub #:secp-mul #:secp-sq #:secp-neg #:secp-inv
+   #:secp-mod #:secp-add #:secp-sub #:secp-mul #:secp-sq #:secp-neg #:secp-inv #:secp-sqrt-cand
    #:secp-double #:secp-add-points #:secp-mul-point #:secp-mul-2
    #:secp-on-curve-p #:secp-pubkey #:secp-inf-p #:secp-x #:secp-y
    ;; constant-time multiply of a secret scalar by the base point G, and

@@ -102,6 +102,35 @@
 ;; point-add, the reference point.lisp helpers, and the wNAF table normalize.
 (defun secp-inv (a) (fast-inv a))
 
+;;; Square-root candidate a^((p+1)/4) mod p — libsecp256k1's secp256k1_fe_sqrt
+;;; chain: the inverse's x2..x223 blocks, then a different tail (1 multiply and
+;;; 2 squarings fewer).  BIP-340 lift_x computed this with a 256-bit bignum
+;;; MOD-EXPT: 143 us, over half of a Schnorr verify.  The caller checks the
+;;; candidate squares back to a (a is a QR iff it does).
+(defun fe-sqrt-cand! (out a)
+  "out = a^((p+1)/4) mod p, fe."
+  (declare (type fe out a) (optimize (speed 3) (safety 0)))
+  (fsqr! *ivx2* a)       (fmul! *ivx2* *ivx2* a)
+  (fsqr! *ivx3* *ivx2*)  (fmul! *ivx3* *ivx3* a)
+  (fsqr-n *ivx6* *ivx3* 3)    (fmul! *ivx6* *ivx6* *ivx3*)
+  (fsqr-n *ivx9* *ivx6* 3)    (fmul! *ivx9* *ivx9* *ivx3*)
+  (fsqr-n *ivx11* *ivx9* 2)   (fmul! *ivx11* *ivx11* *ivx2*)
+  (fsqr-n *ivx22* *ivx11* 11) (fmul! *ivx22* *ivx22* *ivx11*)
+  (fsqr-n *ivx44* *ivx22* 22) (fmul! *ivx44* *ivx44* *ivx22*)
+  (fsqr-n *ivx88* *ivx44* 44) (fmul! *ivx88* *ivx88* *ivx44*)
+  (fsqr-n *ivx176* *ivx88* 88) (fmul! *ivx176* *ivx176* *ivx88*)
+  (fsqr-n *ivx220* *ivx176* 44) (fmul! *ivx220* *ivx220* *ivx44*)
+  (fsqr-n *ivx223* *ivx220* 3) (fmul! *ivx223* *ivx223* *ivx3*)
+  (fsqr-n out *ivx223* 23) (fmul! out out *ivx22*)
+  (fsqr-n out out 6)       (fmul! out out *ivx2*)
+  (fsqr-n out out 2))
+
+(defun secp-sqrt-cand (a)
+  "Integer a^((p+1)/4) mod p (addition chain on the VOP field)."
+  (secp-init)
+  (let ((am (mod a *secp256k1-p*)))
+    (if (zerop am) 0 (progn (fe-sqrt-cand! *inv-r* (i->fe am)) (f->i *inv-r*)))))
+
 ;;; ===========================================================================
 ;;; Scalar field F_n inverse — Montgomery arithmetic + Fermat addition chain.
 ;;; The portable secp-inv-mod (extended-Euclid bignums) was the single biggest

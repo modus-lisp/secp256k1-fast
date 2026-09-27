@@ -145,6 +145,20 @@
         (check "ct-mul-g op-count is scalar-independent" (length ct-profiles) 1)
         (check "variable-time path op-count DOES vary (sanity)" (> (length vt-counts) 1) t)))
 
+    (format t "~%== lift_x square root: addition chain vs bignum ==~%")
+    (let* ((p secp256k1-fast:*secp256k1-p*) (e (floor (+ p 1) 4))
+           (st (sb-ext:seed-random-state 340)) (agree 0) (none 0) (n 2000))
+      (dotimes (i n)
+        (let* ((x (random p st)) (c (mod (+ (* x x x) 7) p))
+               (want (secp256k1-fast:mod-expt c e p))
+               (got (secp256k1-fast:secp-sqrt-cand c)))
+          (when (= got want) (incf agree))
+          (unless (= (mod (* want want) p) c) (incf none))))
+      (check "sqrt candidate matches mod-expt on 2000 random x^3+7" agree n)
+      (check "about half of them have no square root (non-residues exercised)" (< 800 none 1200) t)
+      (check "lift_x rejects an x that is not on the curve"
+             (secp256k1-fast.schnorr:lift-x 5) nil))
+
     (format t "~%== thread safety (concurrent key derivation) ==~%")
     (thread-safety)
 
