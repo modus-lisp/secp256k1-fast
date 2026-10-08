@@ -23,8 +23,11 @@
 (defun int-to-bytes32 (n)
   "Integer → 32-byte big-endian vector."
   (let ((result (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0)))
+    ;; constant mask + constant shift, not (ldb (byte 8 (* i 8)) n): see i->fe in
+    ;; field-limb.lisp for the SBCL 2.6.8 variable-position-LDB miscompile.
     (dotimes (i 32)
-      (setf (aref result (- 31 i)) (ldb (byte 8 (* i 8)) n)))
+      (setf (aref result (- 31 i)) (logand n #xFF)
+            n (ash n -8)))
     result))
 
 (defun mod-expt (base exp m)
