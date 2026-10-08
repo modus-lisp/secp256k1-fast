@@ -34,3 +34,13 @@
   (:local-nicknames (#:secp #:secp256k1-fast) (#:sha #:secp256k1-fast.hash))
   (:documentation "BIP340 Schnorr (Bitcoin taproot / Nostr event signatures).")
   (:export #:schnorr-sign #:schnorr-verify #:tagged-hash #:pubkey-xonly #:lift-x))
+
+(defpackage #:secp256k1-fast.ecdh
+  (:use #:cl)
+  (:documentation "secp256k1 keys, the FIPS ECDH (SHA-256 over the shared point's X
+   coordinate), and the 33-byte compressed SEC1 codec used by FIPS Noise.
+   Authority: upstream jmcorgan/fips @ 57bc510, src/noise/handshake.rs.")
+  (:export
+   #:+pubkey-size+ #:encode-pubkey #:decode-pubkey
+   #:keypair #:keypair-secret #:keypair-public #:keypair-from-secret
+   #:keypair-public-bytes #:ecdh-x #:noise-dh))
