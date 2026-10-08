@@ -4,7 +4,8 @@
   (:use #:cl)
   (:local-nicknames (#:secp #:secp256k1-fast) (#:schnorr #:secp256k1-fast.schnorr)
                     (#:sha #:secp256k1-fast.hash))
-  (:export #:run-all #:cross-check #:bench #:thread-test #:ct-timing))
+  (:export #:run-all #:cross-check #:bench #:thread-test #:ct-timing
+           #:bench-mul-point #:ct-point-timing #:ct-mul-point-differential))
 
 (in-package #:secp256k1-fast.test)
 
@@ -145,12 +146,66 @@
         (check "ct-mul-g op-count is scalar-independent" (length ct-profiles) 1)
         (check "variable-time path op-count DOES vary (sanity)" (> (length vt-counts) 1) t)))
 
+    (format t "~%== constant-time variable-base k*P (vs variable-time path) ==~%")
+    (check "ct-mul-point available on this backend" (secp:ct-mul-point-available-p)
+           #+(and sbcl (or x86-64 arm64)) t #-(and sbcl (or x86-64 arm64)) nil)
+    (ct-mul-point-differential 2000)
+    (when (secp:ct-mul-point-available-p)
+      (let ((n secp:*secp256k1-n*)
+            (o-cadd (symbol-function 'secp::ct-cadd!))
+            (o-sel  (symbol-function 'secp::%ct-select-tab))
+            (p (secp:secp-mul-point 987654321 (secp:secp-generator)))
+            (cadd 0) (sel 0) (profiles '()))
+        (setf (symbol-function 'secp::ct-cadd!) (lambda (&rest a) (incf cadd) (apply o-cadd a))
+              (symbol-function 'secp::%ct-select-tab) (lambda (&rest a) (incf sel) (apply o-sel a)))
+        (unwind-protect
+             (dolist (k (list 0 1 15 16 (1- n) n (1+ n) (ash 1 255) (1- (ash 1 256))
+                              (1+ (random n)) (1+ (random n))))
+               (setf cadd 0 sel 0) (secp:ct-mul-point k p)
+               (pushnew (cons cadd sel) profiles :test #'equal))
+          (setf (symbol-function 'secp::ct-cadd!) o-cadd
+                (symbol-function 'secp::%ct-select-tab) o-sel))
+        (format t "  (ct-mul-point point-op profile (cadd . select): ~a)~%" profiles)
+        (check "ct-mul-point op-count is scalar-independent" (length profiles) 1)))
+
     (format t "~%== thread safety (concurrent key derivation) ==~%")
     (thread-safety)
 
     (format t "~%~a (~d failure~:p)~%" (if (zerop *fail*) "ALL PASS" "FAILURES") *fail*)
     (when (plusp *fail*) (error "secp256k1-fast: ~d test failure(s)" *fail*))
     t))
+
+(defun same-point-p (a b)
+  (if (secp:secp-inf-p a)
+      (secp:secp-inf-p b)
+      (and (not (secp:secp-inf-p b))
+           (= (secp:secp-x a) (secp:secp-x b))
+           (= (secp:secp-y a) (secp:secp-y b)))))
+
+(defun ct-mul-point-differential (&optional (rounds 2000))
+  "CT-MUL-POINT must equal SECP-MUL-POINT for every (scalar, point): ROUNDS
+random pairs plus the edge scalars (0, 1, n-1, n, n+1, multiples of n, 2^256-1,
+values just past 2^256) against random points, G, and the point at infinity."
+  (secp:secp-init)
+  (let* ((n secp:*secp256k1-n*) (g (secp:secp-generator)) (inf secp::*secp256k1-infinity*)
+         (edge-k (list 0 1 2 15 16 17 (1- n) n (1+ n) (* 2 n) (1+ (* 2 n)) (* 5 n) (* 1000 n)
+                       (ash n -1) (1- (ash 1 256)) (ash 1 256) (+ (ash 1 256) 7)
+                       (ash 1 255) (- (ash 1 256) n) (- (ash 1 256) n 1) -1 (- n)))
+         (pts (list* g inf (secp:secp-mul-point (1- n) g)       ; -G
+                     (loop repeat 6 collect (secp:secp-mul-point (1+ (random (1- n))) g))))
+         (bad 0) (total 0))
+    (flet ((one (k p)
+             (incf total)
+             (unless (same-point-p (secp:ct-mul-point k p) (secp:secp-mul-point k p))
+               (incf bad)
+               (when (<= bad 5) (format t "      mismatch k=~x p=~a~%" k p)))))
+      (dolist (k edge-k) (dolist (p pts) (one k p)))
+      (dotimes (i rounds)
+        (one (if (zerop (mod i 4)) (random (ash 1 256)) (random n))
+             (if (zerop (mod i 97)) inf (secp:secp-mul-point (1+ (random (1- n))) g)))))
+    (check (format nil "ct-mul-point == secp-mul-point (~d pairs: ~d random + edge scalars x points incl. infinity)"
+                   total rounds)
+           bad 0)))
 
 ;;; Compare against cl-consensus's crypto over random inputs.
 ;;; NOTE: cl-consensus now DEPENDS ON secp256k1-fast (its crypto is a re-export
@@ -204,6 +259,44 @@
         (format t "  Schnorr verify : ~,0f ops/s~%" (rate (lambda () (schnorr:schnorr-verify px m ssig)) reps))
         (format t "  scalar mult kG : ~,0f ops/s~%" (rate (lambda () (secp:secp-mul-point priv (secp:secp-generator))) reps))
         (values)))))
+
+;;; Variable-base k*P with a full-size secret-like scalar (the ECDH shape):
+;;; the existing variable-time SECP-MUL-POINT against the constant-time
+;;; CT-MUL-POINT.  Kept separate from BENCH so BENCH's rates are unchanged.
+;;;   (secp256k1-fast.test:bench-mul-point)
+(defun bench-mul-point (&optional (reps 2000))
+  (secp:secp-init)
+  (flet ((rate (thunk n) (let ((s (get-internal-run-time)))
+                           (dotimes (i n) (funcall thunk))
+                           (/ n (/ (float (- (get-internal-run-time) s)) internal-time-units-per-second)))))
+    (let* ((k #xC0FFEE1234567890ABCDEF00112233445566778899AABBCCDDEEFF0102030405)
+           (p (secp:secp-mul-point #x1F2E3D4C5B6A79881726354453627180 (secp:secp-generator)))
+           (vt (rate (lambda () (secp:secp-mul-point k p)) reps))
+           (ct (rate (lambda () (secp:ct-mul-point k p)) reps)))
+      (format t "~&== variable-base k*P (256-bit k, per core) ==~%")
+      (format t "  secp-mul-point (variable-time) : ~,0f ops/s~%" vt)
+      (format t "  ct-mul-point   (constant-time) : ~,0f ops/s  (~,2fx slower)~%" ct (/ vt ct))
+      (values vt ct))))
+
+(defun ct-point-timing (&optional (iters 400))
+  "Mean wall ms per CT-MUL-POINT call for scalars of very different Hamming
+weight / magnitude.  Should be flat; SBCL timing on a shared host is noisy and
+is NOT a proof — the op-count check in RUN-ALL is the hard test."
+  (secp:secp-init)
+  (let* ((n secp:*secp256k1-n*)
+         (p (secp:secp-mul-point 77777777777 (secp:secp-generator)))
+         (classes (list (cons "k=1" 1) (cons "k=2^255" (ash 1 255)) (cons "k=n-1" (1- n))
+                        (cons "low HW" #x8000000000000000000000000000000100000000000000000000000000000001)
+                        (cons "high HW" (- n 2)) (cons "random" (1+ (random n))))))
+    (secp:ct-mul-point 3 p)
+    (format t "~&~10a | ct-mul-point ms | secp-mul-point ms~%" "scalar")
+    (dolist (c classes)
+      (flet ((ms (fn)
+               (let ((t0 (get-internal-real-time)))
+                 (dotimes (i iters) (funcall fn (cdr c) p))
+                 (/ (* 1000.0 (- (get-internal-real-time) t0)) internal-time-units-per-second iters))))
+        (format t "~10a |     ~7,4f     |     ~7,4f~%" (car c)
+                (ms #'secp:ct-mul-point) (ms #'secp:secp-mul-point))))))
 
 ;;; Multicore: verification is embarrassingly parallel.  Each worker thread wraps
 ;;; its loop in WITH-FRESH-SCRATCH (per-thread buffers); without it the shared

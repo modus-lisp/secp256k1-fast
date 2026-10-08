@@ -149,6 +149,145 @@ private keys in range)."
     (nmul! o2 o1 (i->fe b))           ; o2 = (a*R)*b*R^-1 = a*b mod n
     (f->i o2)))
 
+;;; ===========================================================================
+;;; Constant-time VARIABLE-BASE scalar multiplication: secret K times an
+;;; arbitrary point P (the ECDH case).  Same machinery as CT-MUL-G — complete
+;;; projective addition for every add AND double, a fixed 4-bit window over all
+;;; 64 nibbles — but the 16-entry table is built PER CALL from P (P is public;
+;;; only K is secret), and the table read masks limbs instead of multiplying.
+;;;
+;;; What the secret controls, and what it does not:
+;;;   - K is reduced mod n by %CT-SCALAR-REDUCE: one unconditional 8-word
+;;;     subtract-with-borrow and a masked select (no comparison, no branch);
+;;;   - the loop is 64 windows x (4 doublings + 1 select + 1 add), always;
+;;;   - %CT-SELECT-TAB reads all 16 entries in order and ORs in (limb AND mask),
+;;;     mask = all-ones iff i = digit — the digit never indexes memory and never
+;;;     reaches a branch;
+;;;   - digit 0 selects the identity (0:1:0), which the complete formula adds
+;;;     correctly, so there is no zero-digit special case.
+;;; Branches that DO exist are on public data only: whether P is the point at
+;;; infinity (input), whether K lies outside [0, 2^256) (a range/type check —
+;;; ECDH secrets are 32-byte scalars, so it never fires there), and whether the
+;;; RESULT is infinity (only when K = 0 mod n for a valid P).
+;;; ===========================================================================
+
+(defconstant +ct-n-words+ 8)
+(defvar *ct-n32*
+  (let ((v (make-array 8 :element-type '(unsigned-byte 32)))
+        (n #xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141))
+    (dotimes (i 8 v) (setf (aref v i) (logand n #xFFFFFFFF) n (ash n -32)))))
+
+;; I->FE peels limbs with LOGAND/ASH, and SBCL takes a different path for a
+;; FIXNUM than for a BIGNUM (and ASH's cost follows the bignum's length).  Adding
+;; 2^256 first makes every intermediate in that peel a bignum of the SAME length
+;; whatever K is (K+2^256 in [2^256, 2^257)), so the per-limb fixnum/bignum test
+;; always goes the same way.  The discarded fifth limb is the 1 we added.
+(defvar *ct-2^256* (ash 1 256))
+
+(defun %ct-scalar-reduce (k)
+  "K mod n for 0 <= K < 2^256, as an FE (4x64 limbs), branch-free in K.
+Since 2^256 < 2n, K mod n is K or K-n: compute D = K-n over eight 32-bit words
+with an arithmetic borrow, then keep K iff the final borrow is 1.  Word
+arithmetic is on fixnums (|diff| < 2^33), so it never conses a bignum."
+  (let* ((kf (i->fe (+ k *ct-2^256*)))   ; low 4 limbs = K; see *CT-2^256*
+         (kw (make-array 8 :element-type '(unsigned-byte 32)))
+         (dw (make-array 8 :element-type '(unsigned-byte 32)))
+         (nw *ct-n32*) (borrow 0) (out (mkfe)))
+    (declare (type fe kf out) (type (simple-array (unsigned-byte 32) (8)) kw dw nw)
+             (type (integer 0 1) borrow))
+    (dotimes (i 4)
+      (setf (aref kw (* 2 i))      (logand (aref kf i) #xFFFFFFFF)
+            (aref kw (1+ (* 2 i))) (ash (aref kf i) -32)))
+    (dotimes (i 8)
+      (let ((diff (- (aref kw i) (aref nw i) borrow)))
+        (declare (type (signed-byte 40) diff))
+        (setf (aref dw i) (logand diff #xFFFFFFFF)
+              borrow (logand (ash diff -32) 1))))     ; 1 iff diff < 0
+    ;; borrow = 1  <=>  K < n  ->  keep K ;  borrow = 0 -> take D = K - n.
+    (let ((keep (logand (- borrow) #xFFFFFFFF)))      ; all-ones iff K < n
+      (declare (type (unsigned-byte 32) keep))
+      (dotimes (i 4 out)
+        (let ((lo (logxor (aref dw (* 2 i))      (logand keep (logxor (aref kw (* 2 i))      (aref dw (* 2 i))))))
+              (hi (logxor (aref dw (1+ (* 2 i))) (logand keep (logxor (aref kw (1+ (* 2 i))) (aref dw (1+ (* 2 i))))))))
+          (declare (type (unsigned-byte 32) lo hi))
+          (setf (aref out i) (logior lo (ash hi 32))))))))
+
+(defun %ct-fe-nibbles (kf)
+  "The 64 base-16 digits of the 4-limb scalar KF (index = window number)."
+  (declare (type fe kf))
+  (let ((d (make-array 64 :element-type 'fixnum)))
+    (declare (type (simple-array fixnum (64)) d))
+    (dotimes (i 4 d)
+      (let ((lo (logand (aref kf i) #xFFFFFFFF)) (hi (ash (aref kf i) -32)))
+        (declare (type (unsigned-byte 32) lo hi))
+        (dotimes (j 8)
+          (setf (aref d (+ (* i 16) j))   (logand (ash lo (* -4 j)) 15)
+                (aref d (+ (* i 16) 8 j)) (logand (ash hi (* -4 j)) 15)))))))
+
+(defun %ct-point-table (p)
+  "Per-call table T[i] = i*P, i = 0..15, projective, as a simple-vector of 48
+FEs (entry i at 3i..3i+2).  T[0] = identity (0:1:0); T[i] = T[i-1] + P by the
+complete formula.  P is public, so this costs nothing in secrecy."
+  (let ((tab (make-array 48)) (px (i->fe (secp-x p))) (py (i->fe (secp-y p))) (pz (i->fe 1)))
+    (setf (aref tab 0) (i->fe 0) (aref tab 1) (i->fe 1) (aref tab 2) (i->fe 0))
+    (loop for i from 1 below 16 do
+      (let ((ox (mkfe)) (oy (mkfe)) (oz (mkfe)) (j (* 3 (1- i))))
+        (ct-cadd! ox oy oz (aref tab j) (aref tab (+ j 1)) (aref tab (+ j 2)) px py pz)
+        (setf (aref tab (* 3 i)) ox (aref tab (+ (* 3 i) 1)) oy (aref tab (+ (* 3 i) 2)) oz)))
+    tab))
+
+(defun %ct-select-tab (tab digit sx sy sz)
+  "Constant-time (sx:sy:sz) <- TAB entry DIGIT: scan all 16 entries, OR in each
+limb ANDed with mask = all-ones iff i = DIGIT.  No secret-indexed access."
+  (declare (type simple-vector tab) (type (integer 0 15) digit) (type fe sx sy sz)
+           (optimize (speed 3) (safety 0)))
+  (fill sx 0) (fill sy 0) (fill sz 0)
+  (dotimes (i 16)
+    (let ((m (logand (- (the (integer 0 1) (%ct-eq i digit))) #xFFFFFFFFFFFFFFFF))
+          (ex (svref tab (* 3 i))) (ey (svref tab (+ (* 3 i) 1))) (ez (svref tab (+ (* 3 i) 2))))
+      (declare (type (unsigned-byte 64) m) (type fe ex ey ez))
+      (dotimes (l 4)
+        (setf (aref sx l) (logior (aref sx l) (logand m (aref ex l)))
+              (aref sy l) (logior (aref sy l) (logand m (aref ey l)))
+              (aref sz l) (logior (aref sz l) (logand m (aref ez l)))))))
+  nil)
+
+(defun ct-mul-point (k p)
+  "Constant-time K*P for a SECRET scalar K and any (public) affine point P.
+Same result as SECP-MUL-POINT for every integer K: K is reduced mod n.  K in
+[0, 2^256) — every 32-byte scalar — takes the branch-free path; anything else
+is first reduced with a variable-time MOD (a range check on the input's type,
+not on its secret value).  P must be on the curve (as SECP-MUL-POINT assumes);
+callers of untrusted points validate them first (DECODE-PUBKEY does)."
+  (secp-init)
+  (when (secp-inf-p p) (return-from ct-mul-point *secp256k1-infinity*))
+  (let* ((k (if (and (integerp k) (<= 0 k) (< k (ash 1 256))) k (mod k *secp256k1-n*)))
+         (nib (%ct-fe-nibbles (%ct-scalar-reduce k)))
+         (tab (%ct-point-table p))
+         (ax *ct-ax*) (ay *ct-ay*) (az *ct-az*)
+         (sx *ct-sx*) (sy *ct-sy*) (sz *ct-sz*)
+         (qx *ct-selx*) (qy *ct-sely*) (qz *ct-selz*))
+    (declare (type (simple-array fixnum (64)) nib))
+    (i->fe! ax 0) (i->fe! ay 1) (i->fe! az 0)          ; accumulator = identity
+    (loop for w fixnum from 63 downto 0 do
+      (dotimes (i 4)                                     ; acc <- 16*acc
+        (ct-cadd! sx sy sz  ax ay az  ax ay az)
+        (fcopy! ax sx) (fcopy! ay sy) (fcopy! az sz))
+      (%ct-select-tab tab (aref nib w) qx qy qz)         ; q = digit*P (CT read)
+      (ct-cadd! sx sy sz  ax ay az  qx qy qz)
+      (fcopy! ax sx) (fcopy! ay sy) (fcopy! az sz))
+    ;; projective -> affine exactly as CT-MUL-G does it.
+    (fmul! az az *one-fe*)
+    (if (fzero? az)
+        *secp256k1-infinity*
+        (progn
+          (fe-inv! *ct-zinv* az)
+          (fmul! *ct-rx* ax *ct-zinv*)
+          (fmul! *ct-ry* ay *ct-zinv*)
+          (cons (f->i *ct-rx*) (f->i *ct-ry*))))))
+
+(defun ct-mul-point-available-p () t)
+
 ;;; ---------------------------------------------------------------------------
 ;;; Thread safety
 ;;;

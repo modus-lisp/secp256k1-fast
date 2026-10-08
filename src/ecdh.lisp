@@ -11,9 +11,10 @@
 ;;;; as (x . y) conses).  secp256k1-fast exposes no ECDH and no SEC1 codec, so
 ;;;; the thin layer lives here rather than being added to that library.
 ;;;;
-;;;; CAVEAT: secp256k1-fast's SECP-MUL-POINT is a variable-time double-and-add
-;;;; (its constant-time path, CT-MUL-G, only covers k*G).  The DH below multiplies
-;;;; a SECRET scalar by a peer point, so it is not constant-time.
+;;;; The DH multiplies a SECRET scalar by a peer point, so it goes through
+;;;; CT-MUL-POINT (fixed-window, complete-formula, constant-time table read) on
+;;;; the limb backend.  On targets without that backend CT-MUL-POINT falls back
+;;;; to the variable-time SECP-MUL-POINT (see point.lisp), like CT-MUL-G does.
 
 (in-package #:secp256k1-fast.ecdh)
 
@@ -72,7 +73,7 @@
 
 (defun ecdh-x (secret point)
   "32-byte X coordinate of SECRET * POINT.  Errors on the point at infinity."
-  (let ((r (secp256k1-fast:secp-mul-point secret point)))
+  (let ((r (secp256k1-fast:ct-mul-point secret point)))
     (when (secp256k1-fast:secp-inf-p r) (error "ECDH produced the point at infinity"))
     (secp256k1-fast:int-to-bytes32 (car r))))
 

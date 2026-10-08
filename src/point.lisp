@@ -136,6 +136,12 @@
 (defun ct-mul-g (k) (secp-mul-point k (secp-generator)))
 (defun ct-mul-g-available-p () nil)
 
+;; CT-MUL-POINT: a *secret* scalar times an arbitrary point (ECDH).  Portable
+;; fallback = the ordinary (variable-time) multiply; ct.lisp overrides it with a
+;; constant-time fixed-window implementation on the limb backend.
+(defun ct-mul-point (k p) (secp-mul-point k p))
+(defun ct-mul-point-available-p () nil)
+
 ;; CT-NMUL: a*b mod n for secret operands.  Portable fallback is the bignum
 ;; product; the limb backend (ct.lisp) overrides it with a constant-time
 ;; Montgomery multiply.

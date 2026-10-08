@@ -27,6 +27,7 @@
 
 (%self-protecting secp-mul-point (k p))
 (%self-protecting ct-mul-g (k))
+(%self-protecting ct-mul-point (k p))
 (%self-protecting secp-pubkey (privkey))
 (%self-protecting secp-inv-mod (a m))
 (%self-protecting ecdsa-sign-raw (privkey-int hash-bytes))

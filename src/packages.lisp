@@ -21,7 +21,8 @@
    #:secp-on-curve-p #:secp-pubkey #:secp-inf-p #:secp-x #:secp-y
    ;; constant-time multiply of a secret scalar by the base point G, and
    ;; constant-time scalar multiply mod n (secret operands in signing)
-   #:ct-mul-g #:ct-mul-g-available-p #:ct-nmul #:with-fresh-ct-scratch
+   #:ct-mul-g #:ct-mul-g-available-p #:ct-nmul
+   #:ct-mul-point #:ct-mul-point-available-p #:with-fresh-ct-scratch
    ;; scalar (mod n)
    #:secp-inv-mod
    ;; ECDSA
