@@ -52,6 +52,24 @@
     (check "pubkey on curve" (secp:secp-on-curve-p (secp:secp-pubkey 12345)) t)
     (check "n*G = infinity" (secp:secp-inf-p (secp:secp-mul-point secp:*secp256k1-n* (secp:secp-generator))) t)
 
+    (format t "== FIPS ECDH (secp256k1-fast.ecdh) ==~%")
+    ;; 3 * (5G) = 15G; its x computed independently with python-ecdsa
+    (check "ecdh-x 3 (5G) = x(15G), independent value"
+           (bytes->hex (secp256k1-fast.ecdh:ecdh-x 3 (secp:secp-pubkey 5)))
+           "d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e")
+    (let ((a 987654321987) (b 123456789123456789))
+      (check "ecdh-x is symmetric: a*(bG) = b*(aG)"
+             (secp256k1-fast.ecdh:ecdh-x a (secp:secp-pubkey b))
+             (secp256k1-fast.ecdh:ecdh-x b (secp:secp-pubkey a))))
+    (flet ((refused (pt)
+             (handler-case (progn (secp256k1-fast.ecdh:ecdh-x 5 pt) nil) (error () t))))
+      (check "ecdh-x refuses an off-curve point (1 . 1)" (refused (cons 1 1)) t)
+      (check "ecdh-x refuses the point at infinity" (refused (secp:secp-mul-point secp:*secp256k1-n* (secp:secp-generator))) t)
+      (let ((g (secp:secp-generator)))
+        (check "ecdh-x refuses x >= p (same residue as G's x)"
+               (refused (cons (+ (car g) secp:*secp256k1-p*) (cdr g))) t)
+        (check "ecdh-x accepts the generator" (refused g) nil)))
+
     (format t "== ECDSA round-trips (RFC6979) ==~%")
     (dotimes (i 5)
       (let* ((priv (+ 1 (mod (* (1+ i) 2654435761) (1- secp:*secp256k1-n*))))

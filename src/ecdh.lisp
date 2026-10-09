@@ -71,8 +71,30 @@
 
 (defun keypair-public-bytes (kp) (encode-pubkey (keypair-public kp)))
 
+(defun peer-point-valid-p (point)
+  "T iff POINT is usable as a peer's DH point: an affine (x . y) with both
+   coordinates in [0, p), on the curve, and not the point at infinity.  The curve
+   has cofactor 1, so on-curve is enough to rule out small-subgroup points."
+  (secp256k1-fast:secp-init)
+  (let ((p secp256k1-fast:*secp256k1-p*))
+    (and (consp point)
+         (integerp (car point)) (integerp (cdr point))
+         (<= 0 (car point)) (< (car point) p)
+         (<= 0 (cdr point)) (< (cdr point) p)
+         (secp256k1-fast:secp-on-curve-p point))))
+
+(defun ecdh-constant-time-p ()
+  "T iff ECDH-X runs the constant-time multiply on this platform.  Elsewhere
+   (including targets without the limb backend) it falls back to the
+   variable-time multiply, which leaks the secret scalar through timing."
+  (and (secp256k1-fast:ct-mul-point-available-p) t))
+
 (defun ecdh-x (secret point)
-  "32-byte X coordinate of SECRET * POINT.  Errors on the point at infinity."
+  "32-byte X coordinate of SECRET * POINT.  Refuses a POINT that is not a valid
+   curve point (an invalid-curve attack recovers the secret from such answers),
+   and errors on the point at infinity."
+  (unless (peer-point-valid-p point)
+    (error "ECDH peer point is not a point on secp256k1"))
   (let ((r (secp256k1-fast:ct-mul-point secret point)))
     (when (secp256k1-fast:secp-inf-p r) (error "ECDH produced the point at infinity"))
     (secp256k1-fast:int-to-bytes32 (car r))))

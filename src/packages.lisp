@@ -44,4 +44,5 @@
   (:export
    #:+pubkey-size+ #:encode-pubkey #:decode-pubkey
    #:keypair #:keypair-secret #:keypair-public #:keypair-from-secret
-   #:keypair-public-bytes #:ecdh-x #:noise-dh))
+   #:keypair-public-bytes #:ecdh-x #:noise-dh
+   #:peer-point-valid-p #:ecdh-constant-time-p))
