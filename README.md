@@ -17,9 +17,14 @@ ironclad — all our own code.
 A clean-room, from-scratch implementation — differential-tested against Bitcoin
 Core's script vectors (via [cl-consensus](../cl-consensus)) and byte-identical to
 cl-consensus's crypto. It is **research / educational software, not audited.**
-The hot paths use `(safety 0)` and are **NOT guaranteed constant-time** — do not
-use this to sign with keys protecting real funds without an independent
-side-channel review. No warranty (see [LICENSE](LICENSE)).
+Only the secret-scalar operations are constant-time: `CT-MUL-G` (k·G, used for
+signing and key derivation) and `CT-MUL-POINT` (a secret scalar times a peer's
+point, used for ECDH). The public-data paths (verification, `SECP-MUL-2`) are
+variable-time by design, and their hot paths use `(safety 0)`. Those
+constant-time paths exist only on the limb backend (SBCL on x86-64 and arm64);
+elsewhere they fall back to the variable-time code. Do not use this to sign with
+keys protecting real funds without an independent side-channel review. No
+warranty (see [LICENSE](LICENSE)).
 
 ## Design
 
@@ -69,8 +74,12 @@ src/ packages.lisp
      field-vops-x86-64.lisp      ; x86-64 field VOPs (mul/reduce/add/sub/montredn) [#+x86-64]
      field-vops-aarch64.lisp     ; arm64 field VOPs — same five primitives        [#+arm64]
      field-limb.lisp             ; limb field + GLV + wNAF + chain inverse (arch-neutral)
+     ct.lisp                     ; constant-time k·G (CT-MUL-G) and k·P (CT-MUL-POINT)
+     threadsafe.lisp             ; per-thread scratch around the entry points
+     ecdh.lisp                   ; package SECP256K1-FAST.ECDH: FIPS ECDH, SEC1 codec
 test/ test.lisp                  ; SHA/HMAC/BIP340 vectors, round-trips, cross-check,
-                                 ;   bench, multicore thread-test
+                                 ;   bench, multicore thread-test, CT-MUL-POINT vs
+                                 ;   SECP-MUL-POINT on 2198 pairs
 ```
 
 ## Build & test
@@ -146,6 +155,16 @@ loaded.
   cores. `(secp256k1-fast.test:thread-test)` exercises it; ~242k verify/s
   aggregate at 64 threads on the EPYC box — well past single-core libsecp. The
   real win for IBD wall-clock.
+
+## FIPS ECDH and the SEC1 codec (`secp256k1-fast.ecdh`)
+
+The FIPS Noise suite uses secp256k1 keys with a particular DH: the shared secret is
+SHA-256 over the 32-byte X coordinate of `secret · peer-point` (upstream
+`jmcorgan/fips` @ 57bc510, `src/noise/handshake.rs`). `ECDH-X` computes it with
+`CT-MUL-POINT`, and `NOISE-DH` hashes it. Public keys travel as 33-byte compressed
+SEC1 (`ENCODE-PUBKEY`, `DECODE-PUBKEY`). `KEYPAIR-FROM-SECRET` takes a caller's
+32 bytes; this library does not generate randomness, so callers draw their own from
+a CSPRNG.
 
 ## Roadmap
 
