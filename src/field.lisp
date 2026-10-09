@@ -83,3 +83,12 @@
              (new-t1 (- t0 (* q t1))))
         (setf r0 r1 r1 new-r1 t0 t1 t1 new-t1)))
     (if (< t0 0) (+ t0 *secp256k1-p*) t0)))
+
+;; Set the curve constants at load, on every Lisp.  SECP-INIT is otherwise lazy
+;; (the entry points call it), but *SECP256K1-N* & co. are exported and callers
+;; read them directly -- cl-nostr's GENERATE-KEYPAIR range-checks a scalar
+;; against *SECP256K1-N* before its first curve operation.  On SBCL ct.lisp
+;; already ran this at load; that file is SBCL-only, so on every other Lisp the
+;; constant was NIL there (CCL and Modus: TYPE-ERROR, NIL is not a REAL).
+;; Loading it also means a first concurrent call can't race the lazy init.
+(secp-init)
