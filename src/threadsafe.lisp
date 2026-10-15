@@ -52,6 +52,7 @@
 (%self-protecting secp-add-points (p1 p2))
 (%self-protecting secp-double (p))
 (%self-protecting secp-on-curve-p (p))
-(%self-protecting secp-inv (a))          ; the limb-backend inverse, under every affine op
+(%self-protecting secp-inv (a))
+(%self-protecting secp-sqrt-candidate (c))   ; the limb chain: FE-INV!'s scratch          ; the limb-backend inverse, under every affine op
 (%self-protecting secp256k1-fast.schnorr:lift-x (x))
 (%self-protecting ct-nmul (a b))       ; Montgomery scalar multiply: shares *mont-scratch*

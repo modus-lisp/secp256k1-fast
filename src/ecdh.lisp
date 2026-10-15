@@ -50,7 +50,7 @@
            (x (secp256k1-fast:bytes-to-int (u8-subseq bytes 1 33))))
       (when (< x p)
         (let* ((c (mod (+ (* x x x) 7) p))
-               (y (secp256k1-fast:mod-expt c (floor (+ p 1) 4) p)))
+               (y (secp256k1-fast:secp-sqrt-candidate c)))
           (when (= (mod (* y y) p) c)
             (let ((want-odd (= (aref bytes 0) 3)))
               (cons x (if (eq (oddp y) want-odd) y (- p y))))))))))

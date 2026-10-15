@@ -84,6 +84,12 @@
         (setf r0 r1 r1 new-r1 t0 t1 t1 new-t1)))
     (if (< t0 0) (+ t0 *secp256k1-p*) t0)))
 
+(defun secp-sqrt-candidate (c)
+  "C^((p+1)/4) mod p: a square root of C when C is a square mod p (p = 3 mod 4),
+   which the caller checks by squaring.  The limb backend replaces it with an
+   addition chain (field-limb.lisp)."
+  (mod-expt c (floor (+ *secp256k1-p* 1) 4) *secp256k1-p*))
+
 ;; Set the curve constants at load, on every Lisp.  SECP-INIT is otherwise lazy
 ;; (the entry points call it), but *SECP256K1-N* & co. are exported and callers
 ;; read them directly -- cl-nostr's GENERATE-KEYPAIR range-checks a scalar

@@ -23,7 +23,8 @@
                  (:file "point")
                  (:file "ecdsa")
                  (:file "schnorr")
-                 ;; Inline-asm field + limb scalar-mult backend (SBCL VOPs).
+                 ;; Inline-asm field + limb scalar-mult backend (SBCL VOPs; on modus
+                 ;; the %MUL-SPLIT intrinsic).
                  ;; The per-architecture VOP file comes FIRST (the VOPs must be
                  ;; registered before their callers compile), then field-limb.lisp
                  ;; — the architecture-neutral backend that calls those VOPs and
@@ -32,14 +33,22 @@
                  ;; %fsub %montredn); field-limb.lisp names only those symbols.
                  ;; Portable field.lisp / point.lisp stay as the fallback +
                  ;; differential oracle (and validate the VOPs on every arch).
+                 ;; The limb field layer the rest is written against: 4x64-bit
+                 ;; limbs over those VOPs on SBCL, 5x52-bit fixnum limbs over the
+                 ;; %MUL-SPLIT intrinsic on modus.  Same interface either way.
                  (:file "field-vops-x86-64"  :if-feature (:and :sbcl :x86-64))
                  (:file "field-vops-aarch64" :if-feature (:and :sbcl :arm64))
-                 (:file "field-limb" :if-feature (:and :sbcl (:or :x86-64 :arm64)))
+                 (:file "fe-sbcl" :if-feature (:and :sbcl (:or :x86-64 :arm64)))
+                 (:file "fe-modus" :if-feature :modus-mul-split)
+                 (:file "field-limb" :if-feature (:or (:and :sbcl (:or :x86-64 :arm64))
+                                                      :modus-mul-split))
                  ;; constant-time k*G for secret scalars (overrides the portable
                  ;; CT-MUL-G fallback); needs the branchless limb field ops.
-                 (:file "ct" :if-feature (:and :sbcl (:or :x86-64 :arm64)))
+                 (:file "ct" :if-feature (:or (:and :sbcl (:or :x86-64 :arm64))
+                                              :modus-mul-split))
                  ;; Last: wraps the entry points above in per-thread scratch.
-                 (:file "threadsafe" :if-feature (:and :sbcl (:or :x86-64 :arm64)))
+                 (:file "threadsafe" :if-feature (:or (:and :sbcl (:or :x86-64 :arm64))
+                                                      :modus-mul-split))
                  ;; FIPS secp256k1 ECDH and SEC1 codec (the Noise protocol itself is natrium.noise).
                  (:file "ecdh"))))
   :in-order-to ((test-op (test-op "secp256k1-fast/test"))))

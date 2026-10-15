@@ -21,7 +21,7 @@
   (secp:secp-init)
   (when (and (>= x 0) (< x (p)))
     (let* ((c (secp:secp-mod (+ (secp:secp-mul (secp:secp-mul x x) x) 7)))
-           (y (secp:mod-expt c (floor (+ (p) 1) 4) (p))))
+           (y (secp:secp-sqrt-candidate c)))
       (when (= (secp:secp-mod (* y y)) c)
         (cons x (if (evenp y) y (- (p) y)))))))
 

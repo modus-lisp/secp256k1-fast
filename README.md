@@ -21,8 +21,9 @@ Only the secret-scalar operations are constant-time: `CT-MUL-G` (k·G, used for
 signing and key derivation) and `CT-MUL-POINT` (a secret scalar times a peer's
 point, used for ECDH). The public-data paths (verification, `SECP-MUL-2`) are
 variable-time by design, and their hot paths use `(safety 0)`. Those
-constant-time paths exist only on the limb backend (SBCL on x86-64 and arm64);
-elsewhere they fall back to the variable-time code. Do not use this to sign with
+constant-time paths exist only on the limb backends (SBCL on x86-64 and arm64,
+and [modus](https://github.com/modus-lisp/modus)); elsewhere they fall back to
+the variable-time code. Do not use this to sign with
 keys protecting real funds without an independent side-channel review. No
 warranty (see [LICENSE](LICENSE)).
 
@@ -50,6 +51,15 @@ trusting a black-box FFI to libsecp.
   `secp-mul-point` / `secp-mul-2`; the portable `point.lisp` stays as the fallback
   (other architectures) and the oracle — the same oracle validates each
   architecture's VOPs.
+- **modus** has no VOPs and a 62-bit fixnum, so a 64-bit limb would be a bignum.
+  **`src/fe-modus.lisp`** supplies the same field interface as `fe-sbcl.lisp`
+  (the 4x64 wrappers over the VOPs) on **5x52-bit fixnum limbs** — libsecp256k1's
+  `field_5x52` layout — with each limb product taken by modus's `%MUL-SPLIT`
+  intrinsic (one 64x64→128 multiply), plus a Montgomery product mod n with
+  R = 2^260. Elements stay weakly reduced between operations. Everything above
+  the field — the point arithmetic, GLV, wNAF, the constant-time paths — is the
+  same code on both Lisps. On modus: Schnorr verify ≈ 3 ms, sign ≈ 6 ms (it was
+  ~300 / ~440 ms on the portable bignum code).
 - **`src/{ecdsa,schnorr}.lisp`** sit on top; **`src/{sha256,hmac}.lisp`** make it
   self-contained (no ironclad) and MVM-portable.
 
@@ -73,7 +83,9 @@ src/ packages.lisp
      ecdsa.lisp schnorr.lisp
      field-vops-x86-64.lisp      ; x86-64 field VOPs (mul/reduce/add/sub/montredn) [#+x86-64]
      field-vops-aarch64.lisp     ; arm64 field VOPs — same five primitives        [#+arm64]
-     field-limb.lisp             ; limb field + GLV + wNAF + chain inverse (arch-neutral)
+     fe-sbcl.lisp                ; the limb field interface over those VOPs (4x64)  [#+sbcl]
+     fe-modus.lisp               ; the same interface on 5x52 fixnum limbs        [#+modus-mul-split]
+     field-limb.lisp             ; limb points + GLV + wNAF + chain inverse/sqrt (neutral)
      ct.lisp                     ; constant-time k·G (CT-MUL-G) and k·P (CT-MUL-POINT)
      threadsafe.lisp             ; per-thread scratch around the entry points
      ecdh.lisp                   ; package SECP256K1-FAST.ECDH: FIPS ECDH, SEC1 codec

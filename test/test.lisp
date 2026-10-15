@@ -90,10 +90,11 @@
           (setf (aref bad 33) (logxor (aref bad 33) 1))
           (check (format nil "schnorr reject tampered #~d" i) (schnorr:schnorr-verify px m bad) nil))))
 
-    #+(and sbcl (or x86-64 arm64))
+    #+(or (and sbcl (or x86-64 arm64)) modus-mul-split)
     (progn
-      (format t "== VOP limb field backend (~a) ==~%"
-              #+x86-64 "x86-64" #+(and arm64 (not x86-64)) "arm64")
+      (format t "== limb field backend (~a) ==~%"
+              #+modus-mul-split "modus 5x52, %mul-split"
+              #+(and sbcl x86-64) "x86-64 VOPs" #+(and sbcl arm64 (not x86-64)) "arm64 VOPs")
       (let ((p secp:*secp256k1-p*) (om (secp::mkfe)) (oa (secp::mkfe)) (os (secp::mkfe))
             (mok t) (aok t) (sok t))
         (dotimes (i 20000)
@@ -101,9 +102,58 @@
             (secp::fmul! om fx fy) (unless (= (secp::f->i om) (mod (* x y) p)) (setf mok nil))
             (secp::fadd! oa fx fy) (unless (= (secp::f->i oa) (mod (+ x y) p)) (setf aok nil))
             (secp::fsub! os fx fy) (unless (= (secp::f->i os) (mod (- x y) p)) (setf sok nil))))
-        (check "%mul256+%reducep fmul! == (* a b) mod p (20k)" mok t)
-        (check "%fadd == (+ a b) mod p (20k)" aok t)
-        (check "%fsub == (- a b) mod p (20k)" sok t))
+        (check "fmul! == (* a b) mod p (20k)" mok t)
+        (check "fadd! == (+ a b) mod p (20k)" aok t)
+        (check "fsub! == (- a b) mod p (20k)" sok t))
+      ;; Chained: each op's OUTPUT is the next op's input, never re-canonicalized,
+      ;; so a backend that keeps elements only weakly reduced (modus's 5x52) is
+      ;; exercised on its own outputs, not just on fresh I->FE values.
+      (let* ((p secp:*secp256k1-p*) (vals (make-array 8)) (fes (make-array 8)) (ok t))
+        (dotimes (i 8)
+          (let ((x (random p))) (setf (aref vals i) x (aref fes i) (secp::i->fe x))))
+        (dotimes (step 30000)
+          (let* ((d (random 8)) (a (random 8)) (b (random 8)) (op (random 5))
+                 (fa (aref fes a)) (fb (aref fes b)) (out (secp::mkfe))
+                 (va (aref vals a)) (vb (aref vals b)))
+            (ecase op
+              (0 (secp::fmul! out fa fb) (setf (aref vals d) (mod (* va vb) p)))
+              (1 (secp::fsqr! out fa) (setf (aref vals d) (mod (* va va) p)))
+              (2 (secp::fadd! out fa fb) (setf (aref vals d) (mod (+ va vb) p)))
+              (3 (secp::fsub! out fa fb) (setf (aref vals d) (mod (- va vb) p)))
+              (4 (secp::fdbl! out fa) (setf (aref vals d) (mod (* 2 va) p))))
+            (setf (aref fes d) out)
+            (unless (= (secp::f->i out) (aref vals d)) (setf ok nil))
+            (unless (eq (secp::fzero? out) (zerop (aref vals d))) (setf ok nil))))
+        (check "chained field ops on their own outputs == integer oracle (30k)" ok t))
+      ;; Values a weakly reduced element can hold that a canonical one cannot.
+      #+modus-mul-split
+      (let* ((p secp:*secp256k1-p*) (ok t)
+             (top (vector #xFFFFFFFFFFFFF #xFFFFFFFFFFFFF #xFFFFFFFFFFFFF #xFFFFFFFFFFFFF
+                          #x1000000000000))   ; the largest weak element, 2^256+2^208-1
+             (topv (+ (ash 1 256) (ash 1 208) -1)))
+        (dolist (x (list 0 1 (1- p) p (1+ p) (- (ash 1 256) 1) (random p)))
+          (let ((fx (secp::i->fe x)) (o (secp::mkfe)))
+            (secp::fmul! o fx top) (unless (= (secp::f->i o) (mod (* x topv) p)) (setf ok nil))
+            (secp::fmul! o top top) (unless (= (secp::f->i o) (mod (* topv topv) p)) (setf ok nil))
+            (secp::fsub! o fx top) (unless (= (secp::f->i o) (mod (- x topv) p)) (setf ok nil))
+            (secp::fsub! o top fx) (unless (= (secp::f->i o) (mod (- topv x) p)) (setf ok nil))
+            (secp::fadd! o top top) (unless (= (secp::f->i o) (mod (* 2 topv) p)) (setf ok nil))
+            (unless (eq (secp::fzero? fx) (zerop (mod x p))) (setf ok nil))))
+        (check "field ops at the weak-form limits (incl. p, 2^256-1, 2^256+2^208-1)" ok t))
+      ;; The Montgomery product mod n itself, through CT-NMUL (a*b mod n).
+      (let ((n secp:*secp256k1-n*) (ok t))
+        (dolist (pair (list* (cons 0 0) (cons 1 1) (cons (1- n) (1- n)) (cons (1- n) 1)
+                             (loop repeat 5000 collect (cons (random n) (random n)))))
+          (unless (= (secp:ct-nmul (car pair) (cdr pair)) (mod (* (car pair) (cdr pair)) n))
+            (setf ok nil)))
+        (check "ct-nmul (Montgomery mod n) == (* a b) mod n (5k + edges)" ok t))
+      ;; The square-root addition chain against the bignum exponentiation it
+      ;; replaces, on squares and non-squares alike (the chain is the same
+      ;; exponent either way; LIFT-X / DECODE-PUBKEY check the square after).
+      (let* ((p secp:*secp256k1-p*) (e (floor (+ p 1) 4)) (ok t))
+        (dolist (c (list* 0 1 4 7 (1- p) (loop repeat 2000 collect (random p))))
+          (unless (= (secp:secp-sqrt-candidate c) (secp:mod-expt c e p)) (setf ok nil)))
+        (check "secp-sqrt-candidate (limb chain) == c^((p+1)/4) mod p (2k + edges)" ok t))
       ;; Direct differential check of the scalar-field VOP path: secp-inv-mod with
       ;; m=n runs the Montgomery inverse (%mul256 + %montredn) — the one VOP not
       ;; covered by the F_p loop above.  Oracle is mod-expt a^(n-2) (portable
@@ -114,7 +164,7 @@
                  (got (secp:secp-inv-mod a n)))
             (unless (and (= got (secp:mod-expt a (- n 2) n)) (= 1 (mod (* a got) n)))
               (setf niok nil))))
-        (check "%montredn n-inverse == a^(n-2) mod n (5k)" niok t))
+        (check "Montgomery n-inverse == a^(n-2) mod n (5k)" niok t))
       ;; NOTE: every ECDSA/Schnorr/pubkey test above now runs through the limb
       ;; backend (secp-mul-point/secp-mul-2 are redefined on x86-64 and arm64),
       ;; so the whole suite is the per-architecture differential oracle for the
@@ -166,7 +216,8 @@
 
     (format t "~%== constant-time variable-base k*P (vs variable-time path) ==~%")
     (check "ct-mul-point available on this backend" (secp:ct-mul-point-available-p)
-           #+(and sbcl (or x86-64 arm64)) t #-(and sbcl (or x86-64 arm64)) nil)
+           #+(or (and sbcl (or x86-64 arm64)) modus-mul-split) t
+           #-(or (and sbcl (or x86-64 arm64)) modus-mul-split) nil)
     (ct-mul-point-differential 2000)
     (when (secp:ct-mul-point-available-p)
       (let ((n secp:*secp256k1-n*)

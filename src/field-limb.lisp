@@ -1,16 +1,18 @@
-;;;; field-limb.lisp — limb field + point backend (architecture-neutral).
+;;;; field-limb.lisp — limb point backend (architecture- and Lisp-neutral).
 ;;;;
-;;;; Loaded ONLY on SBCL with a limb-VOP backend (x86-64 or arm64) and LAST.
-;;;; Uses the five field VOPs — %mul256 %reducep %fadd %fsub %montredn — supplied
-;;;; by the per-architecture file loaded just before this (field-vops-x86-64.lisp
-;;;; or field-vops-aarch64.lisp).  This file itself is portable Lisp: it names
-;;;; only those VOP symbols, never any instruction, so the same backend drives
-;;;; every supported CPU.  It runs the scalar-multiplication hot path entirely on
-;;;; 4x64-bit limb arrays with no per-op allocation, then REDEFINES
-;;;; SECP-MUL-POINT / SECP-MUL-2 so ECDSA/Schnorr verify go through it.  Portable
-;;;; field.lisp / point.lisp stay as the fallback AND the differential oracle
-;;;; (cross-checked byte-for-byte vs cl-consensus, which is checked vs Bitcoin
-;;;; Core) — the same oracle validates each architecture's VOPs.
+;;;; Loaded LAST among the field files, on SBCL with a limb-VOP backend (x86-64 or
+;;;; arm64) and on modus (:MODUS-MUL-SPLIT).  It is written against the limb field
+;;;; interface — FE, MKFE, FMUL! FSQR! FADD! FSUB! FDBL! FCOPY! FZERO? I->FE I->FE!
+;;;; F->I, NMUL!/NSQR!, NAF-INTO / WNAF-INTO — which fe-sbcl.lisp supplies on SBCL
+;;;; (4x64-bit limbs over the per-architecture VOPs) and fe-modus.lisp on modus
+;;;; (5x52-bit fixnum limbs over the %MUL-SPLIT intrinsic).  It names no
+;;;; instruction and no limb count, so the same backend drives every supported CPU
+;;;; and both Lisps.  It runs the scalar-multiplication hot path entirely on limb
+;;;; arrays with no per-op allocation, then REDEFINES SECP-MUL-POINT / SECP-MUL-2
+;;;; so ECDSA/Schnorr verify go through it.  Portable field.lisp / point.lisp stay
+;;;; as the fallback AND the differential oracle (cross-checked byte-for-byte vs
+;;;; cl-consensus, which is checked vs Bitcoin Core) — the same oracle validates
+;;;; each backend.
 ;;;;
 ;;;; The scalar-mult scratch buffers are module-level (fast, zero per-op alloc).
 ;;;; For parallel verify, WITH-FRESH-SCRATCH (bottom of file) rebinds them
@@ -22,42 +24,7 @@
 ;; the portable field.lisp / point.lisp with the fast limb backend — muffle the
 ;; expected redefinition warnings (the portable versions remain the fallback on
 ;; other architectures and the differential oracle).
-(declaim (sb-ext:muffle-conditions sb-kernel:redefinition-warning))
-
-;;; ===========================================================================
-;;; Limb field-element wrappers (4x (unsigned-byte 64))
-;;; ===========================================================================
-
-(deftype fe () '(simple-array (unsigned-byte 64) (4)))
-(declaim (inline mkfe fmul! fsqr! fadd! fsub! fdbl! fcopy! fzero? i->fe f->i))
-(defun mkfe () (make-array 4 :element-type '(unsigned-byte 64) :initial-element 0))
-(defvar *fmul-scratch* (make-array 8 :element-type '(unsigned-byte 64)))
-
-(defun fmul! (out a b)
-  (declare (type fe out a b) (optimize (speed 3) (safety 0)))
-  (sb-sys:with-pinned-objects (a b out *fmul-scratch*)
-    (%mul256 (sb-sys:vector-sap a) (sb-sys:vector-sap b) (sb-sys:vector-sap *fmul-scratch*))
-    (%reducep (sb-sys:vector-sap *fmul-scratch*) (sb-sys:vector-sap out))))
-(defun fsqr! (out a) (fmul! out a a))
-(defun fadd! (out a b)
-  (declare (type fe out a b) (optimize (speed 3) (safety 0)))
-  (sb-sys:with-pinned-objects (a b out) (%fadd (sb-sys:vector-sap a) (sb-sys:vector-sap b) (sb-sys:vector-sap out))))
-(defun fsub! (out a b)
-  (declare (type fe out a b) (optimize (speed 3) (safety 0)))
-  (sb-sys:with-pinned-objects (a b out) (%fsub (sb-sys:vector-sap a) (sb-sys:vector-sap b) (sb-sys:vector-sap out))))
-(defun fdbl! (out a) (fadd! out a a))
-(defun fcopy! (out a) (declare (type fe out a)) (dotimes (i 4) (setf (aref out i) (aref a i))))
-(defun fzero? (a) (declare (type fe a)) (and (zerop (aref a 0)) (zerop (aref a 1)) (zerop (aref a 2)) (zerop (aref a 3))))
-;; Limbs are peeled with a CONSTANT mask and a CONSTANT shift, never with
-;; (ldb (byte 64 (* i 64)) x).  SBCL 2.6.8 (x86-64) open-codes a variable-position
-;; LDB on an integer as a two-digit SHRD whose shift-count TN can be packed into
-;; the same register as the digit it loads (MOV RDI,RAX clobbers the count, then
-;; MOV ECX,EDI) -- so under register pressure (e.g. i->fe inlined next to FADD!)
-;; every limb came out shifted by garbage.  SBCL 2.2.9 called ASH and was correct.
-(defun i->fe (x) (let ((a (mkfe))) (dotimes (i 4 a) (setf (aref a i) (logand x #xFFFFFFFFFFFFFFFF) x (ash x -64)))))
-(declaim (inline i->fe!))
-(defun i->fe! (out x) (declare (type fe out)) (dotimes (i 4 out) (setf (aref out i) (logand x #xFFFFFFFFFFFFFFFF) x (ash x -64))))
-(defun f->i (a) (declare (type fe a)) (logior (aref a 0) (ash (aref a 1) 64) (ash (aref a 2) 128) (ash (aref a 3) 192)))
+#+sbcl (declaim (sb-ext:muffle-conditions sb-kernel:redefinition-warning))
 
 ;;; Field inverse a^(p-2) mod p via libsecp256k1's addition chain (~255 squarings
 ;;; + 14 multiplies), on the VOP field — ~6us vs ~11us for naive Fermat (which
@@ -102,6 +69,33 @@
 ;; point-add, the reference point.lisp helpers, and the wNAF table normalize.
 (defun secp-inv (a) (fast-inv a))
 
+;;; Square root candidate a^((p+1)/4) by libsecp256k1's chain (fe_sqrt): the
+;;; same x2..x223 blocks as FE-INV!, then 2^23 * x22, 2^6 * x2, 2^2.  ~253
+;;; squarings + 13 multiplies on the limb field, where MOD-EXPT on bignums was
+;;; the whole cost of a modus BIP-340 verify (LIFT-X: 22 ms of ~26).
+(defun fe-sqrt-candidate! (out a)
+  "out = a^((p+1)/4) mod p."
+  (declare (type fe out a) (optimize (speed 3) (safety 0)))
+  (fsqr! *ivx2* a)       (fmul! *ivx2* *ivx2* a)
+  (fsqr! *ivx3* *ivx2*)  (fmul! *ivx3* *ivx3* a)
+  (fsqr-n *ivx6* *ivx3* 3)    (fmul! *ivx6* *ivx6* *ivx3*)
+  (fsqr-n *ivx9* *ivx6* 3)    (fmul! *ivx9* *ivx9* *ivx3*)
+  (fsqr-n *ivx11* *ivx9* 2)   (fmul! *ivx11* *ivx11* *ivx2*)
+  (fsqr-n *ivx22* *ivx11* 11) (fmul! *ivx22* *ivx22* *ivx11*)
+  (fsqr-n *ivx44* *ivx22* 22) (fmul! *ivx44* *ivx44* *ivx22*)
+  (fsqr-n *ivx88* *ivx44* 44) (fmul! *ivx88* *ivx88* *ivx44*)
+  (fsqr-n *ivx176* *ivx88* 88) (fmul! *ivx176* *ivx176* *ivx88*)
+  (fsqr-n *ivx220* *ivx176* 44) (fmul! *ivx220* *ivx220* *ivx44*)
+  (fsqr-n *ivx223* *ivx220* 3) (fmul! *ivx223* *ivx223* *ivx3*)
+  (fsqr-n out *ivx223* 23) (fmul! out out *ivx22*)
+  (fsqr-n out out 6)       (fmul! out out *ivx2*)
+  (fsqr-n out out 2))
+
+(defun secp-sqrt-candidate (c)
+  (secp-init)
+  (fe-sqrt-candidate! *inv-r* (i->fe (mod c *secp256k1-p*)))
+  (f->i *inv-r*))
+
 ;;; ===========================================================================
 ;;; Scalar field F_n inverse — Montgomery arithmetic + Fermat addition chain.
 ;;; The portable secp-inv-mod (extended-Euclid bignums) was the single biggest
@@ -112,19 +106,7 @@
 ;;; the bignum inverse.  Window-free square-and-multiply over e = n-2.
 ;;; ===========================================================================
 (defconstant +n-minus-2+ (- #xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141 2))
-(defvar *mont-scratch* (make-array 9 :element-type '(unsigned-byte 64) :initial-element 0))
-(defvar *nR*    (i->fe #x14551231950B75FC4402DA1732FC9BEBF))                                 ; R   mod n = mont(1)
-(defvar *nR2*   (i->fe #x9D671CD581C69BC5E697F5E45BCD07C6741496C20E7CF878896CF21467D7D140))   ; R^2 mod n
 (defvar *n-acc* (mkfe)) (defvar *n-base* (mkfe)) (defvar *n-out* (mkfe))
-
-(declaim (inline nmul! nsqr!))
-(defun nmul! (out a b)
-  "out = a*b*R^-1 mod n (Montgomery product)."
-  (declare (type fe out a b) (optimize (speed 3) (safety 0)))
-  (sb-sys:with-pinned-objects (a b out *mont-scratch*)
-    (%mul256 (sb-sys:vector-sap a) (sb-sys:vector-sap b) (sb-sys:vector-sap *mont-scratch*))
-    (%montredn (sb-sys:vector-sap *mont-scratch*) (sb-sys:vector-sap out))))
-(defun nsqr! (out a) (nmul! out a a))
 
 (defun n-inv! (out a)
   "out = a^-1 mod n (fe, assumes 0 < a < n).  a^(n-2) via Montgomery exponentiation."
@@ -232,30 +214,6 @@
       (setf kk (ash kk -1)) (incf i))
     (values d i)))
 
-;; NAF/wNAF recoding over a 2-limb (lo,hi) view of the sub-scalar (< 2^128).
-;; Looping on the bignum K (ash/decf) conses ~128 bignums per call — the second
-;; biggest verify allocator after the mod-n inverse — so shift/subtract the
-;; scalar as two (unsigned-byte 64) limbs, kept unboxed via #xFFFF...-masking.
-(defmacro %m64 (x) `(logand ,x #xFFFFFFFFFFFFFFFF))
-(declaim (inline naf-into wnaf-into))
-(defun naf-into (k buf)
-  "NAF of K (< 2^128) into BUF → length.  Allocation-free (limb recoding)."
-  (declare (type (simple-array fixnum (*)) buf) (optimize (speed 3) (safety 0)))
-  (let ((lo (ldb (byte 64 0) k)) (hi (ldb (byte 64 64) k)) (i 0))
-    (declare (type (unsigned-byte 64) lo hi) (type fixnum i))
-    (loop until (and (zerop lo) (zerop hi)) do
-      (cond ((logbitp 0 lo)
-             (let ((z (- 2 (logand lo 3))))                 ; lo odd → z in {1,-1}
-               (setf (aref buf i) z)
-               (if (= z 1)
-                   (setf lo (%m64 (- lo 1)))                ; lo odd → no borrow
-                   (if (= lo #xFFFFFFFFFFFFFFFF)
-                       (setf lo 0 hi (%m64 (+ hi 1)))
-                       (setf lo (%m64 (+ lo 1)))))))
-            (t (setf (aref buf i) 0)))
-      (setf lo (%m64 (logior (ash lo -1) (ash (logand hi 1) 63))) hi (ash hi -1))
-      (incf i))
-    i))
 
 (defun negy-int (y) (if (zerop y) 0 (- *secp256k1-p* y)))
 
@@ -332,28 +290,6 @@
           (setf (aref d i) 0))
       (setf kk (ash kk -1)) (incf i))
     (values d i)))
-
-(defun wnaf-into (k w buf)
-  "Width-w NAF of K (< 2^128) into BUF → length.  Allocation-free (limb recoding)."
-  (declare (type (simple-array fixnum (*)) buf) (type (integer 1 16) w) (optimize (speed 3) (safety 0)))
-  (let ((lo (ldb (byte 64 0) k)) (hi (ldb (byte 64 64) k)) (i 0)
-        (m (ash 1 w)) (mh (ash 1 (1- w))))
-    (declare (type (unsigned-byte 64) lo hi) (type fixnum i m mh))
-    (loop until (and (zerop lo) (zerop hi)) do
-      (cond ((logbitp 0 lo)
-             (let ((z (logand lo (- m 1))))                 ; lo mod 2^w (w<=16 → fixnum)
-               (when (>= z mh) (decf z m))                  ; signed digit, |z| < 2^(w-1)
-               (setf (aref buf i) z)
-               (if (>= z 0)
-                   (setf lo (%m64 (- lo z)))                ; z>0 → z<=lo, no borrow
-                   (let ((zz (- z)))
-                     (if (<= lo (- #xFFFFFFFFFFFFFFFF zz))
-                         (setf lo (%m64 (+ lo zz)))
-                         (setf lo (%m64 (+ lo zz)) hi (%m64 (+ hi 1))))))))
-            (t (setf (aref buf i) 0)))
-      (setf lo (%m64 (logior (ash lo -1) (ash (logand hi 1) 63))) hi (ash hi -1))
-      (incf i))
-    i))
 
 (defvar *wx* (mkfe)) (defvar *wy* (mkfe)) (defvar *wz* (mkfe))
 ;;; per-thread reusable buffers for the verify hot path (glv-mul-2-gwnaf):
@@ -452,5 +388,8 @@
          (*n-acc* (mkfe)) (*n-base* (mkfe)) (*n-out* (mkfe)))
      ,@body))
 
-;; Build the static generator wNAF table now (read-only thereafter → race-free).
+;; Build the static generator wNAF table and beta now (read-only thereafter →
+;; race-free; on modus a worker thread may not store its own objects into these
+;; module-level variables at all).
 (build-gtab)
+(glv-beta)

@@ -13,9 +13,9 @@
 ;;;;     there are no secret-dependent branches and no special cases;
 ;;;;   - a fixed 4-bit window over all 64 nibbles of the 256-bit scalar (constant
 ;;;;     256 doublings + 64 additions regardless of the scalar);
-;;;;   - a constant-time table read: every window scans all 16 entries and selects
-;;;;     with field-arithmetic masking (multiply by a 0/1 flag), so the secret
-;;;;     nibble never indexes memory.
+;;;;   - a constant-time table read: every window scans all 16 entries and ORs in
+;;;;     each limb ANDed with an all-ones-or-zero mask, so the secret nibble never
+;;;;     indexes memory or reaches a branch.
 ;;;;
 ;;;; Constant-time *at the algorithm + field-arithmetic level on the VOP backend*.
 ;;;; In a GC'd runtime this is not a formal microarchitectural guarantee (GC,
@@ -71,26 +71,30 @@ P=Q and the identity (so it doubles too)."
     (- 1 (logand (ash (logior x (- x)) -62) 1))))
 
 (defvar *ct-selx* (mkfe)) (defvar *ct-sely* (mkfe)) (defvar *ct-selz* (mkfe))
-(defvar *ct-tmp* (mkfe)) (defvar *ct-self* (mkfe))
+
+(defvar *ct-gtab-flat* nil)
+
+(defun %ct-gtab-flat ()
+  "*CT-GTAB* flattened to %CT-SELECT-TAB's layout: entry i's X Y Z at 3i..3i+2."
+  (or *ct-gtab-flat*
+      (setf *ct-gtab-flat*
+            (let ((flat (make-array 48)) (tab (%ct-table)))
+              (dotimes (i 16 flat)
+                (dotimes (c 3) (setf (svref flat (+ (* 3 i) c)) (aref (aref tab i) c))))))))
 
 (defun %ct-select (digit)
   "Constant-time read of table entry DIGIT into (*ct-selx* *ct-sely* *ct-selz*):
-scan all 16, accumulate entry*flag where flag = (i==digit)."
-  (declare (type fixnum digit) (optimize (speed 3) (safety 0)))
-  (let ((tab (%ct-table)) (sx *ct-selx*) (sy *ct-sely*) (sz *ct-selz*)
-        (tmp *ct-tmp*) (self *ct-self*))
-    (fill sx 0) (fill sy 0) (fill sz 0)
-    (dotimes (i 16)
-      (i->fe! self (%ct-eq i digit))         ; 0 or 1 as a field element
-      (let ((e (aref tab i)))
-        (fmul! tmp self (aref e 0)) (fadd! sx sx tmp)
-        (fmul! tmp self (aref e 1)) (fadd! sy sy tmp)
-        (fmul! tmp self (aref e 2)) (fadd! sz sz tmp)))))
+scan all 16 and OR in each limb ANDed with mask = all-ones iff i = DIGIT
+(%CT-SELECT-TAB).  It used to MULTIPLY each entry by a 0/1 field flag and add:
+the same constant-time shape at 48 field multiplies a read, which on modus was a
+third of CT-MUL-G."
+  (%ct-select-tab (%ct-gtab-flat) digit *ct-selx* *ct-sely* *ct-selz*))
 
 (defvar *ct-ax* (mkfe)) (defvar *ct-ay* (mkfe)) (defvar *ct-az* (mkfe))
 (defvar *ct-sx* (mkfe)) (defvar *ct-sy* (mkfe)) (defvar *ct-sz* (mkfe))
 (defvar *ct-zinv* (mkfe)) (defvar *ct-rx* (mkfe)) (defvar *ct-ry* (mkfe))
 
+#-modus-mul-split
 (defun %ct-nibbles (k)
   "The 64 base-16 digits of K (0 <= K < 2^256), index = window number.  K is
 converted to a fixed 4-limb form ONCE (via i->fe); the per-nibble slicing then
@@ -105,6 +109,13 @@ than touching the secret bignum 64 times (which would leak its magnitude)."
         (dotimes (j 8)
           (setf (aref d (+ (* i 16) j))      (logand (ash lo (* -4 j)) 15)
                 (aref d (+ (* i 16) 8 j))    (logand (ash hi (* -4 j)) 15)))))))
+
+#+modus-mul-split
+(defun %ct-nibbles (k)
+  "The 64 base-16 digits of K (0 <= K < 2^256), index = window number.  As on
+SBCL: K becomes fixed limbs ONCE (2^256 added first so the bignum the limbs are
+peeled from has the same length for every K), then the slicing is fixnum work."
+  (%ct-fe-nibbles (i->fe (+ k *ct-2^256*))))
 
 (defun ct-mul-g (k)
   "Constant-time K*G for 0 <= K < n.  Returns an affine (x . y) point, or the
@@ -184,6 +195,7 @@ private keys in range)."
 ;; always goes the same way.  The discarded fifth limb is the 1 we added.
 (defvar *ct-2^256* (ash 1 256))
 
+#-modus-mul-split
 (defun %ct-scalar-reduce (k)
   "K mod n for 0 <= K < 2^256, as an FE (4x64 limbs), branch-free in K.
 Since 2^256 < 2n, K mod n is K or K-n: compute D = K-n over eight 32-bit words
@@ -212,6 +224,27 @@ arithmetic is on fixnums (|diff| < 2^33), so it never conses a bignum."
           (declare (type (unsigned-byte 32) lo hi))
           (setf (aref out i) (logior lo (ash hi 32))))))))
 
+#+modus-mul-split
+(defun %ct-scalar-reduce (k)
+  "K mod n for 0 <= K < 2^256, as an FE (5x52 limbs), branch-free in K: D = K-n
+with a signed borrow rippled through the limbs, then keep K iff D < 0.  Every
+intermediate is a fixnum."
+  (let* ((kf (i->fe (+ k *ct-2^256*)))   ; low 256 bits = K; see *CT-2^256*
+         (nf *ct-n-limbs*) (out (mkfe)) (c 0) (d (mkfe)))
+    (dotimes (i 5)
+      (let ((x (+ (- (svref kf i) (svref nf i)) c)))
+        (if (< i 4)
+            (setf c (ash x -52) (svref d i) (logand x +m52+))
+            (setf (svref d i) x))))
+    (let ((mask (ash (svref d 4) -62)))  ; all-ones iff K < n
+      (dotimes (i 5 out)
+        (setf (svref out i)
+              (logxor (svref d i) (logand mask (logxor (svref kf i) (svref d i)))))))))
+
+#+modus-mul-split
+(defvar *ct-n-limbs* (i->fe #xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141))
+
+#-modus-mul-split
 (defun %ct-fe-nibbles (kf)
   "The 64 base-16 digits of the 4-limb scalar KF (index = window number)."
   (declare (type fe kf))
@@ -223,6 +256,14 @@ arithmetic is on fixnums (|diff| < 2^33), so it never conses a bignum."
         (dotimes (j 8)
           (setf (aref d (+ (* i 16) j))   (logand (ash lo (* -4 j)) 15)
                 (aref d (+ (* i 16) 8 j)) (logand (ash hi (* -4 j)) 15)))))))
+
+#+modus-mul-split
+(defun %ct-fe-nibbles (kf)
+  "The 64 base-16 digits of the 5x52-limb scalar KF (index = window number).  A
+52-bit limb holds exactly 13 nibbles, so no digit straddles two limbs."
+  (let ((d (make-array 64 :element-type 'fixnum)))
+    (dotimes (w 64 d)
+      (setf (aref d w) (logand (ash (svref kf (floor w 13)) (* -4 (mod w 13))) 15)))))
 
 (defun %ct-point-table (p)
   "Per-call table T[i] = i*P, i = 0..15, projective, as a simple-vector of 48
@@ -236,6 +277,7 @@ complete formula.  P is public, so this costs nothing in secrecy."
         (setf (aref tab (* 3 i)) ox (aref tab (+ (* 3 i) 1)) oy (aref tab (+ (* 3 i) 2)) oz)))
     tab))
 
+#-modus-mul-split
 (defun %ct-select-tab (tab digit sx sy sz)
   "Constant-time (sx:sy:sz) <- TAB entry DIGIT: scan all 16 entries, OR in each
 limb ANDed with mask = all-ones iff i = DIGIT.  No secret-indexed access."
@@ -250,6 +292,22 @@ limb ANDed with mask = all-ones iff i = DIGIT.  No secret-indexed access."
         (setf (aref sx l) (logior (aref sx l) (logand m (aref ex l)))
               (aref sy l) (logior (aref sy l) (logand m (aref ey l)))
               (aref sz l) (logior (aref sz l) (logand m (aref ez l)))))))
+  nil)
+
+#+modus-mul-split
+(defun %ct-select-tab (tab digit sx sy sz)
+  "Constant-time (sx:sy:sz) <- TAB entry DIGIT, as on SBCL; the mask is the fixnum
+-1 (all ones over a 52-bit limb) or 0."
+  (declare (type simple-vector tab) (type (simple-array t (5)) sx sy sz))
+  (fill sx 0) (fill sy 0) (fill sz 0)
+  (dotimes (i 16)
+    (let ((m (- (%ct-eq i digit)))
+          (ex (svref tab (* 3 i))) (ey (svref tab (+ (* 3 i) 1))) (ez (svref tab (+ (* 3 i) 2))))
+      (declare (type (simple-array t (5)) ex ey ez))
+      (dotimes (l 5)
+        (setf (svref sx l) (logior (svref sx l) (logand m (svref ex l)))
+              (svref sy l) (logior (svref sy l) (logand m (svref ey l)))
+              (svref sz l) (logior (svref sz l) (logand m (svref ez l)))))))
   nil)
 
 (defun ct-mul-point (k p)
@@ -326,7 +384,6 @@ callers of untrusted points validate them first (DECODE-PUBKEY does)."
   `(let ((*ct-t0* (mkfe)) (*ct-t1* (mkfe)) (*ct-t2* (mkfe))
          (*ct-t3* (mkfe)) (*ct-t4* (mkfe))
          (*ct-selx* (mkfe)) (*ct-sely* (mkfe)) (*ct-selz* (mkfe))
-         (*ct-tmp* (mkfe)) (*ct-self* (mkfe))
          (*ct-ax* (mkfe)) (*ct-ay* (mkfe)) (*ct-az* (mkfe))
          (*ct-sx* (mkfe)) (*ct-sy* (mkfe)) (*ct-sz* (mkfe))
          (*ct-zinv* (mkfe)) (*ct-rx* (mkfe)) (*ct-ry* (mkfe)))
@@ -336,3 +393,4 @@ callers of untrusted points validate them first (DECODE-PUBKEY does)."
 ;; two threads constructing it at once.
 (secp-init)
 (%ct-table)
+(%ct-gtab-flat)
