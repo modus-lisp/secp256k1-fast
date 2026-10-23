@@ -27,6 +27,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: secp256k1-fast
+
+      # The secret-key paths take natrium (hashing, HMAC) and its gossamer (keys in
+      # memory the collector never moves); run-tests.sh finds natrium beside us.
+      - name: Sibling checkout
+        run: git clone --depth 1 -q https://github.com/modus-lisp/natrium.git natrium
 
       - name: Install SBCL (apt)
         if: matrix.sbcl == 'apt'
@@ -55,4 +62,5 @@ jobs:
         run: sbcl --version
 
       - name: Run test suite
+        working-directory: secp256k1-fast
         run: ./run-tests.sh

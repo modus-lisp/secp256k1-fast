@@ -147,9 +147,7 @@
 ;; Montgomery multiply.
 (defun ct-nmul (a b) (mod (* a b) *secp256k1-n*))
 
-(defun secp-pubkey (privkey)
-  "Public-key point from a private-key integer (constant-time in the secret)."
-  (ct-mul-g privkey))
+;;; SECP-PUBKEY takes a private key, so it lives in secret.lisp.
 
 (defun secp-on-curve-p (p)
   "Is P on y^2 = x^3 + 7?"

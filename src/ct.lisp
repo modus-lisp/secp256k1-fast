@@ -117,15 +117,16 @@ SBCL: K becomes fixed limbs ONCE (2^256 added first so the bignum the limbs are
 peeled from has the same length for every K), then the slicing is fixnum work."
   (%ct-fe-nibbles (i->fe (+ k *ct-2^256*))))
 
-(defun ct-mul-g (k)
-  "Constant-time K*G for 0 <= K < n.  Returns an affine (x . y) point, or the
-point at infinity for K=0.  K must already be reduced (callers pass nonces /
-private keys in range)."
+(defun %ct-mul-g-nib (nib)
+  "Constant-time digits*G for NIB, the scalar's 64 base-16 digits (index = window).
+Returns T when the result is the point at infinity; otherwise leaves the affine
+result in *CT-RX* / *CT-RY* (FEs) and returns NIL -- so a caller whose result is
+itself secret (none today for k*G, but see %CT-MUL-POINT-NIB) never has to make it
+an integer."
+  (declare (type (simple-array fixnum (64)) nib))
   (secp-init)
   (let ((ax *ct-ax*) (ay *ct-ay*) (az *ct-az*)
-        (sx *ct-sx*) (sy *ct-sy*) (sz *ct-sz*)
-        (nib (%ct-nibbles k)))
-    (declare (type (simple-array fixnum (64)) nib))
+        (sx *ct-sx*) (sy *ct-sy*) (sz *ct-sz*))
     (i->fe! ax 0) (i->fe! ay 1) (i->fe! az 0)        ; accumulator = identity
     (loop for w fixnum from 63 downto 0 do
       (dotimes (i 4)                                   ; acc <- 16*acc (four doublings)
@@ -137,16 +138,24 @@ private keys in range)."
     ;; projective -> affine: (X/Z, Y/Z), entirely in the FE/VOP domain so the
     ;; secret-derived coordinates never become variable-length bignums.  Z is
     ;; canonicalized first (fadd!/fsub! leave results in [0,2^256), so an infinity
-    ;; result Z=p must reduce to 0 before the zero test).  f->i runs only on the
-    ;; final affine x,y — which are the public output point.
+    ;; result Z=p must reduce to 0 before the zero test).
     (fmul! az az *one-fe*)                            ; canonicalize Z to [0,p)
     (if (fzero? az)
-        *secp256k1-infinity*
+        t
         (progn
           (fe-inv! *ct-zinv* az)                      ; Z^-1 via constant-time Fermat chain
           (fmul! *ct-rx* ax *ct-zinv*)                ; X/Z
           (fmul! *ct-ry* ay *ct-zinv*)                ; Y/Z
-          (cons (f->i *ct-rx*) (f->i *ct-ry*))))))
+          nil))))
+
+(defun ct-mul-g (k)
+  "Constant-time K*G for 0 <= K < n.  Returns an affine (x . y) point, or the
+point at infinity for K=0.  K must already be reduced (callers pass nonces /
+private keys in range).  K is an integer, so it is already on the heap: secret
+callers use the fixed-buffer entry points in SECRET.LISP instead."
+  (if (%ct-mul-g-nib (%ct-nibbles k))
+      *secp256k1-infinity*
+      (cons (f->i *ct-rx*) (f->i *ct-ry*))))
 
 (defun ct-mul-g-available-p () t)
 
@@ -310,22 +319,18 @@ limb ANDed with mask = all-ones iff i = DIGIT.  No secret-indexed access."
               (svref sz l) (logior (svref sz l) (logand m (svref ez l)))))))
   nil)
 
-(defun ct-mul-point (k p)
-  "Constant-time K*P for a SECRET scalar K and any (public) affine point P.
-Same result as SECP-MUL-POINT for every integer K: K is reduced mod n.  K in
-[0, 2^256) — every 32-byte scalar — takes the branch-free path; anything else
-is first reduced with a variable-time MOD (a range check on the input's type,
-not on its secret value).  P must be on the curve (as SECP-MUL-POINT assumes);
-callers of untrusted points validate them first (DECODE-PUBKEY does)."
+(defun %ct-mul-point-nib (nib p)
+  "Constant-time digits*P for NIB (64 base-16 digits) and a public affine P on the
+curve.  Returns T for the point at infinity; otherwise leaves the affine result in
+*CT-RX* / *CT-RY* and returns NIL.  ECDH's result is the shared secret, so its
+caller reads it out of the FEs into fixed bytes and it is never an integer."
+  (declare (type (simple-array fixnum (64)) nib))
   (secp-init)
-  (when (secp-inf-p p) (return-from ct-mul-point *secp256k1-infinity*))
-  (let* ((k (if (and (integerp k) (<= 0 k) (< k (ash 1 256))) k (mod k *secp256k1-n*)))
-         (nib (%ct-fe-nibbles (%ct-scalar-reduce k)))
-         (tab (%ct-point-table p))
+  (when (secp-inf-p p) (return-from %ct-mul-point-nib t))
+  (let* ((tab (%ct-point-table p))
          (ax *ct-ax*) (ay *ct-ay*) (az *ct-az*)
          (sx *ct-sx*) (sy *ct-sy*) (sz *ct-sz*)
          (qx *ct-selx*) (qy *ct-sely*) (qz *ct-selz*))
-    (declare (type (simple-array fixnum (64)) nib))
     (i->fe! ax 0) (i->fe! ay 1) (i->fe! az 0)          ; accumulator = identity
     (loop for w fixnum from 63 downto 0 do
       (dotimes (i 4)                                     ; acc <- 16*acc
@@ -337,12 +342,26 @@ callers of untrusted points validate them first (DECODE-PUBKEY does)."
     ;; projective -> affine exactly as CT-MUL-G does it.
     (fmul! az az *one-fe*)
     (if (fzero? az)
-        *secp256k1-infinity*
+        t
         (progn
           (fe-inv! *ct-zinv* az)
           (fmul! *ct-rx* ax *ct-zinv*)
           (fmul! *ct-ry* ay *ct-zinv*)
-          (cons (f->i *ct-rx*) (f->i *ct-ry*))))))
+          nil))))
+
+(defun ct-mul-point (k p)
+  "Constant-time K*P for a scalar K and any (public) affine point P.  Same result
+as SECP-MUL-POINT for every integer K: K is reduced mod n.  K in [0, 2^256) takes the
+branch-free path; anything else is first reduced with a variable-time MOD (a range
+check on the input's type, not its value).  K is an integer, already on the heap:
+secret callers use ECDH-X in SECRET.LISP, which never makes the scalar or the result
+an integer."
+  (secp-init)
+  (when (secp-inf-p p) (return-from ct-mul-point *secp256k1-infinity*))
+  (let ((k (if (and (integerp k) (<= 0 k) (< k (ash 1 256))) k (mod k *secp256k1-n*))))
+    (if (%ct-mul-point-nib (%ct-fe-nibbles (%ct-scalar-reduce k)) p)
+        *secp256k1-infinity*
+        (cons (f->i *ct-rx*) (f->i *ct-ry*)))))
 
 (defun ct-mul-point-available-p () t)
 
@@ -381,6 +400,14 @@ callers of untrusted points validate them first (DECODE-PUBKEY does)."
      (%with-ct-buffers-only ,@body)))
 
 (defmacro %with-ct-buffers-only (&body body)
+  "Inside WITH-SECRET-SCRATCH the buffers are already bound to fixed memory, and
+rebinding them to fresh heap arrays would put secret intermediates back on the
+moving heap -- so in a secret scope this binds nothing."
+  (let ((f (gensym "BODY")))
+    `(flet ((,f () ,@body))
+       (if *secret-scope* (,f) (%with-ct-buffers-fresh (,f))))))
+
+(defmacro %with-ct-buffers-fresh (&body body)
   `(let ((*ct-t0* (mkfe)) (*ct-t1* (mkfe)) (*ct-t2* (mkfe))
          (*ct-t3* (mkfe)) (*ct-t4* (mkfe))
          (*ct-selx* (mkfe)) (*ct-sely* (mkfe)) (*ct-selz* (mkfe))

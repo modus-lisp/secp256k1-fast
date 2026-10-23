@@ -28,22 +28,16 @@
 (%self-protecting secp-mul-point (k p))
 (%self-protecting ct-mul-g (k))
 (%self-protecting ct-mul-point (k p))
-(%self-protecting secp-pubkey (privkey))
 (%self-protecting secp-inv-mod (a m))
-(%self-protecting ecdsa-sign-raw (privkey-int hash-bytes))
 (%self-protecting ecdsa-verify (pubkey-pt hash-bytes r s))
 ;; The double-scalar multiplication behind signature verification, and the
 ;; Schnorr entry points built on it.  cl-deposits found this one: a relay reader
 ;; thread verifying Nostr event signatures while a worker verified ledger
 ;; cosignatures made valid signatures fail, intermittently, in one process.
 (%self-protecting secp-mul-2 (k1 p1 k2 p2))
-(let ((inner (fdefinition 'secp256k1-fast.schnorr:schnorr-sign)))
-  (setf (fdefinition 'secp256k1-fast.schnorr:schnorr-sign)
-        (lambda (privkey-int msg32 &optional (aux nil aux-p))
-          (with-fresh-ct-scratch
-            (if aux-p (funcall inner privkey-int msg32 aux) (funcall inner privkey-int msg32))))))
+;; SECP-PUBKEY, PUBKEY-XONLY, SCHNORR-SIGN and ECDSA-SIGN-RAW are in secret.lisp and
+;; bind their own (fixed) scratch with WITH-SECRET-SCRATCH.
 (%self-protecting secp256k1-fast.schnorr:schnorr-verify (pubkey32 msg32 sig64))
-(%self-protecting secp256k1-fast.schnorr:pubkey-xonly (privkey-int))
 
 ;; The affine point and field entry points.  cl-deposits found these: a node
 ;; building a taproot output (lift_x, then an affine add of t*G) on its worker

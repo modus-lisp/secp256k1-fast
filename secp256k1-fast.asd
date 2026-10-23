@@ -10,7 +10,7 @@
   :version "0.1.0"
   :author "ynniv"
   :license "MIT"
-  :depends-on ()
+  :depends-on ("natrium")   ; secrets in fixed memory (natrium/gossamer); one streaming SHA-2
   :serial t
   :components
   ((:module "src"
@@ -50,7 +50,11 @@
                  (:file "threadsafe" :if-feature (:or (:and :sbcl (:or :x86-64 :arm64))
                                                       :modus-mul-split))
                  ;; FIPS secp256k1 ECDH and SEC1 codec (the Noise protocol itself is natrium.noise).
-                 (:file "ecdh"))))
+                 (:file "ecdh")
+                 ;; every operation that takes a private key; needs the constant-time
+                 ;; limb backend, so it does not exist where that backend does not
+                 (:file "secret" :if-feature (:or (:and :sbcl (:or :x86-64 :arm64))
+                                                  :modus-mul-split)))))
   :in-order-to ((test-op (test-op "secp256k1-fast/test"))))
 
 (defsystem "secp256k1-fast/test"

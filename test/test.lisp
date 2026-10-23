@@ -16,6 +16,107 @@
     (unless ok (incf *fail*) (format t "      got:  ~a~%      want: ~a~%" got want))
     ok))
 
+(defun sk (n)
+  "A fixed 32-byte private key from the PUBLIC test integer N (tests only)."
+  (gossamer:pooled-copy (secp:int-to-bytes32 n)))
+
+(defun ecdh (a point)
+  "ECDH-X with the test integer A as the private key, into a fresh fixed buffer."
+  (let ((out (gossamer:make-fixed-octets 32)))
+    (secp256k1-fast.ecdh:ecdh-x (sk a) point out)
+    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
+(defparameter *bip340-vectors*
+  '(;; BIP-340 vectors 15-18: messages that are not 32 bytes
+    ("0340034003400340034003400340034003400340034003400340034003400340"
+     "778CAA53B4393AC467774D09497A87224BF9FAB6F6E68B23086497324D6FD117"
+     "0000000000000000000000000000000000000000000000000000000000000000"
+     ""
+     "71535DB165ECD9FBBC046E5FFAEA61186BB6AD436732FCCC25291A55895464CF6069CE26BF03466228F19A3A62DB8A649F2D560FAC652827D1AF0574E427AB63")
+    ;; BIP-340 vectors 15-18: messages that are not 32 bytes
+    ("0340034003400340034003400340034003400340034003400340034003400340"
+     "778CAA53B4393AC467774D09497A87224BF9FAB6F6E68B23086497324D6FD117"
+     "0000000000000000000000000000000000000000000000000000000000000000"
+     "11"
+     "08A20A0AFEF64124649232E0693C583AB1B9934AE63B4C3511F3AE1134C6A303EA3173BFEA6683BD101FA5AA5DBC1996FE7CACFC5A577D33EC14564CEC2BACBF")
+    ("0340034003400340034003400340034003400340034003400340034003400340"
+     "778CAA53B4393AC467774D09497A87224BF9FAB6F6E68B23086497324D6FD117"
+     "0000000000000000000000000000000000000000000000000000000000000000"
+     "0102030405060708090A0B0C0D0E0F1011"
+     "5130F39A4059B43BC7CAC09A19ECE52B5D8699D1A71E3C52DA9AFDB6B50AC370C4A482B77BF960F8681540E25B6771ECE1E5A37FD80E5A51897C5566A97EA5A5")
+    ("0340034003400340034003400340034003400340034003400340034003400340"
+     "778CAA53B4393AC467774D09497A87224BF9FAB6F6E68B23086497324D6FD117"
+     "0000000000000000000000000000000000000000000000000000000000000000"
+     "99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"
+     "403B12B0D8555A344175EA7EC746566303321E5DBFA8BE6F091635163ECA79A8585ED3E3170807E7C03B720FC54C7B23897FCBA0E9D0B4A06894CFD249F22367")
+    ("0000000000000000000000000000000000000000000000000000000000000003"
+     "F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9"
+     "0000000000000000000000000000000000000000000000000000000000000000"
+     "0000000000000000000000000000000000000000000000000000000000000000"
+     "E907831F80848D1069A5371B402410364BDF1C5F8307B0084C55F1CE2DCA821525F66A4A85EA8B71E482A74F382D2CE5EBEEE8FDB2172F477DF4900D310536C0")
+    ("B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF"
+     "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659"
+     "0000000000000000000000000000000000000000000000000000000000000001"
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89"
+     "6896BD60EEAE296DB48A229FF71DFE071BDE413E6D43F917DC8DCF8C78DE33418906D11AC976ABCCB20B091292BFF4EA897EFCB639EA871CFA95F6DE339E4B0A")
+    ("C90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B14E5C9"
+     "DD308AFEC5777E13121FA72B9CC1B7CC0139715309B086C960E18FD969774EB8"
+     "C87AA53824B4D7AE2EB035A2B5BBBCCC080E76CDC6D1692C4B0B62D798E6D906"
+     "7E2D58D8B3BCDF1ABADEC7829054F90DDA9805AAB56C77333024B9D0A508B75C"
+     "5831AAEED7B44BB74E5EAB94BA9D4294C49BCF2A60728D8B4C200F50DD313C1BAB745879A5AD954A72C45A91C3A51D3C7ADEA98D82F8481E0E1E03674A6F3FB7")
+    ("0B432B2677937381AEF05BB02A66ECD012773062CF3FA2549E44F58ED2401710"
+     "25D1DFF95105F5253C4022F628A996AD3A0D95FBF21D468A1B33F8C160D8F517"
+     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+     "7EB0509757E246F19449885651611CB965ECC1A187DD51B64FDA1EDC9637D5EC97582B9CB13DB3933705B32BA982AF5AF25FD78881EBB32771FC5922EFC66EA3")))
+
+#+sbcl
+(defun %heap-holds-p (patterns)
+  "How many moving-heap objects contain any of PATTERNS (each a list of an element
+type and a vector): octet vectors by subsequence, word/limb arrays by equality of
+contents."
+  (let ((hits 0))
+    (sb-vm:map-allocated-objects
+     (lambda (obj type size) (declare (ignore type size))
+       (dolist (p patterns)
+         (when (and (typep obj (car p)) (>= (length obj) (length (cdr p))) (search (cdr p) obj))
+           (incf hits))))
+     :dynamic)
+    hits))
+
+(defun residue-check ()
+  "After signing with a fixed key and a full GC, no moving-heap object holds the key
+as bytes, as 64-bit limbs, as 32-bit words or as its nibbles -- and the scan does see
+those shapes when the old integer path is used (positive control)."
+  #-sbcl (format t "  (residue check is SBCL-only)~%")
+  #+sbcl
+  (let* ((d #x8E3F15F4A7B1C2D30E4F5A6B7C8D9EA1B2C3D4E5F60718293A4B5C6D7E8F9012)
+         (key (sk d))
+         (bytes (coerce (secp:int-to-bytes32 d) '(simple-array (unsigned-byte 8) (*))))
+         (limbs (let ((v (make-array 4 :element-type '(unsigned-byte 64))))
+                  (dotimes (i 4 v) (setf (aref v i) (ldb (byte 64 (* 64 i)) d)))))
+         (words (let ((v (make-array 8 :element-type 'fixnum)))
+                  (dotimes (i 8 v) (setf (aref v i) (ldb (byte 32 (* 32 i)) d)))))
+         (nibs (let ((v (make-array 64 :element-type 'fixnum)))
+                 (dotimes (i 64 v) (setf (aref v i) (ldb (byte 4 (* 4 i)) d)))))
+         (pats (list (cons '(simple-array (unsigned-byte 8) (*)) bytes)
+                     (cons '(simple-array (unsigned-byte 64) (*)) limbs)
+                     (cons '(simple-array fixnum (*)) words)
+                     (cons '(simple-array fixnum (*)) nibs)))
+         (m (sha:sha256 (ascii "residue"))))
+    (sb-ext:gc :full t)
+    (let ((base (%heap-holds-p pats)))
+      (dotimes (i 20)
+        (schnorr:schnorr-sign key m) (secp:ecdsa-sign-raw key m) (schnorr:pubkey-xonly key)
+        (ecdh d (secp:secp-generator)))
+      (sb-ext:gc :full t)
+      (let ((after (%heap-holds-p pats)))
+        (format t "  key-shaped heap objects: ~a baseline (the patterns), ~a after 80 secret operations~%" base after)
+        (check "no key bytes, limbs, words or nibbles left on the moving heap" (- after base) 0))
+      ;; positive control: the integer ladder conses the key's limbs and nibbles
+      (secp:ct-mul-g d)
+      (check "residue scan sees the integer path's copies" (> (%heap-holds-p pats) base) t))))
+
 (defun hex->bytes (s)
   (let ((out (make-array (/ (length s) 2) :element-type '(unsigned-byte 8))))
     (dotimes (i (length out) out)
@@ -44,25 +145,25 @@
 
     (format t "== secp256k1 public keys ==~%")
     (check "1*G = generator x"
-           (bytes->hex (secp:int-to-bytes32 (secp:secp-x (secp:secp-pubkey 1))))
+           (bytes->hex (secp:int-to-bytes32 (secp:secp-x (secp:secp-pubkey (sk 1)))))
            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
     (check "x-only pubkey of priv=3 (BIP340)"
-           (string-upcase (bytes->hex (schnorr:pubkey-xonly 3)))
+           (string-upcase (bytes->hex (schnorr:pubkey-xonly (sk 3))))
            "F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9")
-    (check "pubkey on curve" (secp:secp-on-curve-p (secp:secp-pubkey 12345)) t)
+    (check "pubkey on curve" (secp:secp-on-curve-p (secp:secp-pubkey (sk 12345))) t)
     (check "n*G = infinity" (secp:secp-inf-p (secp:secp-mul-point secp:*secp256k1-n* (secp:secp-generator))) t)
 
     (format t "== FIPS ECDH (secp256k1-fast.ecdh) ==~%")
     ;; 3 * (5G) = 15G; its x computed independently with python-ecdsa
     (check "ecdh-x 3 (5G) = x(15G), independent value"
-           (bytes->hex (secp256k1-fast.ecdh:ecdh-x 3 (secp:secp-pubkey 5)))
+           (bytes->hex (ecdh 3 (secp:secp-pubkey (sk 5))))
            "d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e")
     (let ((a 987654321987) (b 123456789123456789))
       (check "ecdh-x is symmetric: a*(bG) = b*(aG)"
-             (secp256k1-fast.ecdh:ecdh-x a (secp:secp-pubkey b))
-             (secp256k1-fast.ecdh:ecdh-x b (secp:secp-pubkey a))))
+             (ecdh a (secp:secp-pubkey (sk b)))
+             (ecdh b (secp:secp-pubkey (sk a)))))
     (flet ((refused (pt)
-             (handler-case (progn (secp256k1-fast.ecdh:ecdh-x 5 pt) nil) (error () t))))
+             (handler-case (progn (ecdh 5 pt) nil) (error () t))))
       (check "ecdh-x refuses an off-curve point (1 . 1)" (refused (cons 1 1)) t)
       (check "ecdh-x refuses the point at infinity" (refused (secp:secp-mul-point secp:*secp256k1-n* (secp:secp-generator))) t)
       (let ((g (secp:secp-generator)))
@@ -73,18 +174,18 @@
     (format t "== ECDSA round-trips (RFC6979) ==~%")
     (dotimes (i 5)
       (let* ((priv (+ 1 (mod (* (1+ i) 2654435761) (1- secp:*secp256k1-n*))))
-             (pub (secp:secp-pubkey priv))
+             (pub (secp:secp-pubkey (sk priv)))
              (h (sha:sha256 (ascii (format nil "ecdsa-msg-~d" i)))))
-        (multiple-value-bind (r s) (secp:ecdsa-sign-raw priv h)
+        (multiple-value-bind (r s) (secp:ecdsa-sign-raw (sk priv) h)
           (check (format nil "ecdsa verify #~d" i) (and (secp:ecdsa-verify pub h r s) t) t)
           (check (format nil "ecdsa reject tampered #~d" i) (secp:ecdsa-verify pub h r (1+ s)) nil))))
 
     (format t "== BIP340 Schnorr round-trips ==~%")
     (dotimes (i 5)
       (let* ((priv (+ 1 (mod (* (+ i 7) 40503) (1- secp:*secp256k1-n*))))
-             (px (schnorr:pubkey-xonly priv))
+             (px (schnorr:pubkey-xonly (sk priv)))
              (m (sha:sha256 (ascii (format nil "schnorr-msg-~d" i))))
-             (sig (schnorr:schnorr-sign priv m)))
+             (sig (schnorr:schnorr-sign (sk priv) m)))
         (check (format nil "schnorr verify #~d" i) (and (schnorr:schnorr-verify px m sig) t) t)
         (let ((bad (copy-seq sig)))
           (setf (aref bad 33) (logxor (aref bad 33) 1))
@@ -237,6 +338,61 @@
         (format t "  (ct-mul-point point-op profile (cadd . select): ~a)~%" profiles)
         (check "ct-mul-point op-count is scalar-independent" (length profiles) 1)))
 
+    (format t "~%== BIP-340 signing vectors (bip-0340/test-vectors.csv, 0-3) ==~%")
+    (loop for (seck pub aux msg sig) in *bip340-vectors* for i from 0 do
+      (let ((sk (gossamer:fixed-copy (hex->bytes seck))))
+        (check (format nil "bip340 #~a pubkey" i) (string-upcase (bytes->hex (schnorr:pubkey-xonly sk))) pub)
+        (check (format nil "bip340 #~a signature" i)
+               (string-upcase (bytes->hex (schnorr:schnorr-sign sk (hex->bytes msg) (hex->bytes aux)))) sig)))
+
+    (format t "~%== RFC 6979 / ECDSA (secp256k1, key 1, \"Satoshi Nakamoto\") ==~%")
+    (let ((sk (sk 1)) (h (sha:sha256 (ascii "Satoshi Nakamoto"))))
+      (check "rfc6979 k" (format nil "~(~64,'0x~)" (secp:rfc6979-k sk h))
+             "8f8a276c19f4149656b280621e358cce24f5f52542772691ee69063b74f15d15")
+      (multiple-value-bind (r s) (secp:ecdsa-sign-raw sk h)
+        (check "ecdsa r" (format nil "~(~64,'0x~)" r) "934b1ea10a4b3c1757e2b0c017d0b6143ce3c9a7e6a4a49860d7a6ab210ee3d8")
+        (check "ecdsa s (low-s)" (format nil "~(~64,'0x~)" s) "2442ce9d2b916064108014783e923ec36b49743e2ffa1c4496f01a512aafd9e5")))
+
+    (format t "~%== secret discipline ==~%")
+    (check "an integer private key is refused"
+           (handler-case (progn (schnorr:schnorr-sign 3 (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0)) :accepted)
+             (error () :refused))
+           :refused)
+    (check "a heap copy of a private key is refused"
+           (handler-case (progn (schnorr:pubkey-xonly (secp:int-to-bytes32 3)) :accepted) (gossamer:not-fixed () :refused))
+           :refused)
+    (check "a key >= n is refused"
+           (handler-case (progn (schnorr:pubkey-xonly (gossamer:fixed-copy (secp:int-to-bytes32 secp:*secp256k1-n*))) :accepted)
+             (error () :refused))
+           :refused)
+    (format t "~%== key arithmetic on fixed buffers ==~%")
+    (let ((n secp:*secp256k1-n*) (state (sb-ext:seed-random-state 7)) (ok t))
+      (dotimes (i 50)
+        (let* ((a (1+ (random (1- n) state))) (b (1+ (random (1- n) state)))
+               (out (gossamer:make-fixed-octets 32)) (out33 (gossamer:make-fixed-octets 33))
+               (g (secp:secp-generator)))
+          (flet ((int (buf) (secp:bytes-to-int buf)))
+            (secp:seckey-negate-into (sk a) out)
+            (unless (= (int out) (- n a)) (setf ok nil))
+            (secp:seckey-negate-into (sk a) out :negate nil)
+            (unless (= (int out) a) (setf ok nil))
+            (secp:seckey-tweak-mul-into (sk a) (sk b) out)
+            (unless (= (int out) (mod (* a b) n)) (setf ok nil))
+            (secp:seckey-add-into (sk a) (sk b) out)
+            (unless (= (int out) (mod (+ a b) n)) (setf ok nil))
+            (let ((pt (secp:secp-mul-point a (secp:secp-mul-point b g))))
+              (secp256k1-fast.ecdh:ecdh-compressed-into (sk a) (secp:secp-mul-point b g) out33)
+              (unless (and (= (aref out33 0) (if (oddp (secp:secp-y pt)) 3 2))
+                           (= (secp:bytes-to-int (subseq out33 1)) (secp:secp-x pt)))
+                (setf ok nil))))))
+      (check "negate / tweak-mul / add / compressed ECDH agree with integer math (50 random)" ok t))
+    (check "tweak-mul refuses a zero tweak"
+           (handler-case (progn (secp:seckey-tweak-mul-into (sk 5) (gossamer:fixed-copy (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0))
+                                                            (gossamer:make-fixed-octets 32)) :accepted)
+             (error () :refused))
+           :refused)
+    (residue-check)
+
     (format t "~%== thread safety (concurrent key derivation) ==~%")
     (thread-safety)
 
@@ -294,17 +450,17 @@ values just past 2^256) against random points, G, and the point at infinity."
       (let* ((priv (+ 1 (mod (* (+ i 1) 2654435761) (1- secp:*secp256k1-n*))))
              (h (sha:sha256 (ascii (format nil "x~d" i)))))
         ;; pubkey
-        (let ((a (secp:int-to-bytes32 (secp:secp-x (secp:secp-pubkey priv))))
+        (let ((a (secp:int-to-bytes32 (secp:secp-x (secp:secp-pubkey (sk priv)))))
               (b (funcall (intern "INT-TO-BYTES32" ec)
                           (funcall (intern "SECP-X" ec) (funcall (intern "SECP-PUBKEY" ec) priv)))))
           (unless (equalp a b) (incf fails) (format t "pubkey mismatch ~d~%" i)))
         ;; ECDSA: deterministic, so signatures must be byte-identical
-        (multiple-value-bind (r1 s1) (secp:ecdsa-sign-raw priv h)
+        (multiple-value-bind (r1 s1) (secp:ecdsa-sign-raw (sk priv) h)
           (multiple-value-bind (r2 s2) (funcall (intern "ECDSA-SIGN-RAW" ec) priv h)
             (unless (and (= r1 r2) (= s1 s2)) (incf fails) (format t "ecdsa mismatch ~d~%" i))))
         ;; Schnorr: deterministic, byte-identical signatures
         (let* ((m h)
-               (sa (schnorr:schnorr-sign priv m))
+               (sa (schnorr:schnorr-sign (sk priv) m))
                (sb (funcall (intern "SCHNORR-SIGN" sc) priv m)))
           (unless (equalp sa sb) (incf fails) (format t "schnorr mismatch ~d~%" i)))))
     (format t "~&cross-check vs cl-consensus (~d rounds): ~a~%"
@@ -318,11 +474,11 @@ values just past 2^256) against random points, G, and the point at infinity."
   (flet ((rate (thunk n) (let ((s (get-internal-run-time)))
                            (dotimes (i n) (funcall thunk))
                            (/ n (/ (float (- (get-internal-run-time) s)) internal-time-units-per-second)))))
-    (let* ((priv 424242424242424242) (pub (secp:secp-pubkey priv))
+    (let* ((priv 424242424242424242) (pub (secp:secp-pubkey (sk priv)))
            (h (sha:sha256 (ascii "bench")))
-           (d 987654321987654321) (px (schnorr:pubkey-xonly d))
-           (m (sha:sha256 (ascii "bench"))) (ssig (schnorr:schnorr-sign d m)))
-      (multiple-value-bind (r s) (secp:ecdsa-sign-raw priv h)
+           (d 987654321987654321) (px (schnorr:pubkey-xonly (sk d)))
+           (m (sha:sha256 (ascii "bench"))) (ssig (schnorr:schnorr-sign (sk d) m)))
+      (multiple-value-bind (r s) (secp:ecdsa-sign-raw (sk priv) h)
         (format t "~&== secp256k1-fast throughput (per core) ==~%")
         (format t "  ECDSA verify   : ~,0f ops/s~%" (rate (lambda () (secp:ecdsa-verify pub h r s)) reps))
         (format t "  Schnorr verify : ~,0f ops/s~%" (rate (lambda () (schnorr:schnorr-verify px m ssig)) reps))
@@ -372,8 +528,8 @@ is NOT a proof — the op-count check in RUN-ALL is the hard test."
 ;;; scratch would corrupt across threads.  Run:  (secp256k1-fast.test:thread-test)
 (defun thread-test (&optional (nthreads 16) (per 3000))
   (secp:secp-init)
-  (let* ((priv 424242424242424242) (pub (secp:secp-pubkey priv)) (h (sha:sha256 (ascii "thr"))))
-    (multiple-value-bind (r s) (secp:ecdsa-sign-raw priv h)
+  (let* ((priv 424242424242424242) (pub (secp:secp-pubkey (sk priv))) (h (sha:sha256 (ascii "thr"))))
+    (multiple-value-bind (r s) (secp:ecdsa-sign-raw (sk priv) h)
       (flet ((work ()                       ; per thread: `per` valid+tampered checks → error count
                (secp:with-fresh-scratch
                  (let ((bad 0))
@@ -411,7 +567,7 @@ is NOT a proof — the op-count check in RUN-ALL is the hard test."
   #-sb-thread (progn (format t "~&(no threads in this build — skipped)~%") t)
   #+sb-thread
   (let* ((k #x1111111111111111111111111111111111111111111111111111111111111111)
-         (want (secp:secp-pubkey k))
+         (want (secp:secp-pubkey (sk k)))
          (bad 0)
          (lock (sb-thread:make-mutex)))
     (mapc #'sb-thread:join-thread
@@ -420,7 +576,7 @@ is NOT a proof — the op-count check in RUN-ALL is the hard test."
                          (lambda ()
                            (secp:with-fresh-ct-scratch
                              (dotimes (i iters)
-                               (let ((got (handler-case (secp:secp-pubkey k)
+                               (let ((got (handler-case (secp:secp-pubkey (sk k))
                                             (error () nil))))
                                  (unless (equal got want)
                                    (sb-thread:with-mutex (lock) (incf bad))))))))))
@@ -430,9 +586,9 @@ is NOT a proof — the op-count check in RUN-ALL is the hard test."
   ;; A taproot tweak (lift_x, then P + t*G) computed on one thread while another
   ;; verified signatures came out as a valid-looking wrong point (cl-deposits).
   ;; No WITH-FRESH-CT-SCRATCH here on purpose: the entry points must protect themselves.
-  (let* ((x (secp:secp-x (secp:secp-pubkey #x2222222222222222222222222222222222222222222222222222222222222222)))
+  (let* ((x (secp:secp-x (secp:secp-pubkey (sk #x2222222222222222222222222222222222222222222222222222222222222222))))
          (p (secp256k1-fast.schnorr:lift-x x))
-         (tg (secp:secp-pubkey #x3333))
+         (tg (secp:secp-pubkey (sk #x3333)))
          (want (secp:secp-add-points p tg))
          (bad 0)
          (lock (sb-thread:make-mutex)))

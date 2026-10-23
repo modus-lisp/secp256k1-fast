@@ -368,7 +368,18 @@
 ;;; below to avoid a first-call race.
 ;;; ===========================================================================
 
+(defvar *secret-scope* nil
+  "True inside WITH-SECRET-SCRATCH (secret.lisp), where every scratch buffer is
+already bound to fixed memory.  The fresh-scratch macros then bind nothing.")
+
 (defmacro with-fresh-scratch (&body body)
+  "Bind this module's scratch to fresh buffers for BODY (per-thread safety) -- or,
+inside a secret scope, keep the fixed buffers already bound."
+  (let ((f (gensym "BODY")))
+    `(flet ((,f () ,@body))
+       (if *secret-scope* (,f) (%with-fresh-scratch-buffers (,f))))))
+
+(defmacro %with-fresh-scratch-buffers (&body body)
   `(let ((*fmul-scratch* (make-array 8 :element-type '(unsigned-byte 64)))
          (*inv-r* (mkfe))
          (*ivx2* (mkfe)) (*ivx3* (mkfe)) (*ivx6* (mkfe)) (*ivx9* (mkfe)) (*ivx11* (mkfe))

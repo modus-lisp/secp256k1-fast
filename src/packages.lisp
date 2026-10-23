@@ -2,8 +2,8 @@
 
 (defpackage #:secp256k1-fast.hash
   (:use #:cl)
-  (:documentation "Self-contained SHA-256 + HMAC-SHA256 (no external deps).")
-  (:export #:sha256 #:hmac-sha256 #:ascii->bytes))
+  (:documentation "SHA-256 + HMAC-SHA256 (natrium's streaming, fixed-scratch implementation).")
+  (:export #:sha256 #:sha256-into #:hmac-sha256 #:hmac-sha256-into #:ascii->bytes))
 
 (defpackage #:secp256k1-fast
   (:use #:cl)
@@ -28,6 +28,8 @@
    #:secp-inv-mod
    ;; ECDSA
    #:ecdsa-sign-raw #:ecdsa-verify #:rfc6979-k
+   ;; private keys as fixed buffers (secret.lisp)
+   #:seckey-valid-p #:seckey-tweak-add-into #:seckey-negate-into #:seckey-tweak-mul-into #:seckey-add-into #:seckey-compressed-pubkey
    ;; reentrancy: bind the scalar-mult scratch per-thread for parallel verify
    #:with-fresh-scratch))
 
@@ -45,5 +47,5 @@
   (:export
    #:+pubkey-size+ #:encode-pubkey #:decode-pubkey
    #:keypair #:keypair-secret #:keypair-public #:keypair-from-secret
-   #:keypair-public-bytes #:ecdh-x #:noise-dh
+   #:keypair-public-bytes #:keypair-wipe #:keypair-p #:ecdh-x #:ecdh-compressed-into #:noise-dh
    #:peer-point-valid-p #:ecdh-constant-time-p))

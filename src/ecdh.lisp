@@ -57,19 +57,7 @@
 
 ;;; --- Keys ------------------------------------------------------------------
 
-(defstruct (keypair (:constructor %make-keypair (secret public)))
-  secret     ; integer in [1, n-1]
-  public)    ; affine point
-
-(defun keypair-from-secret (secret-bytes)
-  "Keypair from a 32-byte big-endian secret.  Errors on 0 or >= n, as
-   `SecretKey::from_slice` does."
-  (let ((k (secp256k1-fast:bytes-to-int secret-bytes)))
-    (unless (and (= (length secret-bytes) 32) (< 0 k (secp-n)))
-      (error "invalid secp256k1 secret key"))
-    (%make-keypair k (secp256k1-fast:secp-pubkey k))))
-
-(defun keypair-public-bytes (kp) (encode-pubkey (keypair-public kp)))
+;;; The keypair, ECDH-X and NOISE-DH hold or use a private key: secret.lisp.
 
 (defun peer-point-valid-p (point)
   "T iff POINT is usable as a peer's DH point: an affine (x . y) with both
@@ -89,16 +77,3 @@
    variable-time multiply, which leaks the secret scalar through timing."
   (and (secp256k1-fast:ct-mul-point-available-p) t))
 
-(defun ecdh-x (secret point)
-  "32-byte X coordinate of SECRET * POINT.  Refuses a POINT that is not a valid
-   curve point (an invalid-curve attack recovers the secret from such answers),
-   and errors on the point at infinity."
-  (unless (peer-point-valid-p point)
-    (error "ECDH peer point is not a point on secp256k1"))
-  (let ((r (secp256k1-fast:ct-mul-point secret point)))
-    (when (secp256k1-fast:secp-inf-p r) (error "ECDH produced the point at infinity"))
-    (secp256k1-fast:int-to-bytes32 (car r))))
-
-(defun noise-dh (keypair point)
-  "The FIPS Noise DH (handshake.rs `fn ecdh`): SHA-256(x(secret * point))."
-  (secp256k1-fast.hash:sha256 (ecdh-x (keypair-secret keypair) point)))
