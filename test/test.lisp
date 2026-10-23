@@ -106,9 +106,13 @@ those shapes when the old integer path is used (positive control)."
          (m (sha:sha256 (ascii "residue"))))
     (sb-ext:gc :full t)
     (let ((base (%heap-holds-p pats)))
-      (dotimes (i 20)
-        (schnorr:schnorr-sign key m) (secp:ecdsa-sign-raw key m) (schnorr:pubkey-xonly key)
-        (ecdh d (secp:secp-generator)))
+      ;; Every operation takes the FIXED key.  (The ECDH helper above takes an integer
+      ;; and builds the key's bytes on the heap to import them -- a copy the test makes,
+      ;; which a stale stack slot can keep alive through the GC on arm64.)
+      (let ((shared (gossamer:make-fixed-octets 32)))
+        (dotimes (i 20)
+          (schnorr:schnorr-sign key m) (secp:ecdsa-sign-raw key m) (schnorr:pubkey-xonly key)
+          (secp256k1-fast.ecdh:ecdh-x key (secp:secp-generator) shared)))
       (sb-ext:gc :full t)
       (let ((after (%heap-holds-p pats)))
         (format t "  key-shaped heap objects: ~a baseline (the patterns), ~a after 80 secret operations~%" base after)
