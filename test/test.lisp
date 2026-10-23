@@ -116,7 +116,9 @@ those shapes when the old integer path is used (positive control)."
       (sb-ext:gc :full t)
       (let ((after (%heap-holds-p pats)))
         (format t "  key-shaped heap objects: ~a baseline (the patterns), ~a after 80 secret operations~%" base after)
-        (check "no key bytes, limbs, words or nibbles left on the moving heap" (- after base) 0))
+        ;; AFTER may be below BASE: the test's own setup leaves a heap copy (it builds the
+        ;; key from an integer) that a later collection may free.  Signing must add none.
+        (check "no key bytes, limbs, words or nibbles left on the moving heap" (<= after base) t))
       ;; positive control: the integer ladder conses the key's limbs and nibbles
       (secp:ct-mul-g d)
       (check "residue scan sees the integer path's copies" (> (%heap-holds-p pats) base) t))))
